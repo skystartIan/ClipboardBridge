@@ -46,27 +46,28 @@ public class ClipboardService extends Service {
     private void handleImage(String imagePath) {
         Log.d(ClipboardReceiver.TAG, "handleImage: " + imagePath);
 
-        File file = new File(imagePath);
+        // 用 App 私有目錄，不需要任何讀寫權限
+        File file = new File(getFilesDir(), "cb_tmp.png");
+        Log.d(ClipboardReceiver.TAG, "Reading: " + file.getAbsolutePath() + " exists=" + file.exists());
+
         if (!file.exists()) {
-            Log.e(ClipboardReceiver.TAG, "File not found: " + imagePath);
-            toast("Error: file not found: " + imagePath);
+            toast("Error: file not found in " + getFilesDir());
             return;
         }
 
         Bitmap bitmap = null;
         try {
-            // 用 FileInputStream 直接讀，避免路徑權限問題
             InputStream is = new FileInputStream(file);
             bitmap = BitmapFactory.decodeStream(is);
             is.close();
         } catch (Exception e) {
-            Log.e(ClipboardReceiver.TAG, "decode failed", e);
-            toast("Error: decode failed: " + e.getMessage());
+            Log.e(ClipboardReceiver.TAG, "decode failed: " + e.getMessage());
+            toast("Error: " + e.getMessage());
             return;
         }
 
         if (bitmap == null) {
-            toast("Error: bitmap is null");
+            toast("Error: bitmap null");
             return;
         }
 
@@ -74,7 +75,7 @@ public class ClipboardService extends Service {
         bitmap.recycle();
 
         if (uri == null) {
-            toast("Error: MediaStore save failed");
+            toast("Error: MediaStore failed");
             return;
         }
 
@@ -82,8 +83,8 @@ public class ClipboardService extends Service {
         if (cm == null) return;
 
         cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
-        Log.d(ClipboardReceiver.TAG, "Image set to clipboard: " + uri);
-        toast("Image ready to paste ✓");
+        Log.d(ClipboardReceiver.TAG, "✓ Clipboard set: " + uri);
+        toast("✓ 圖片已就緒，按 Ctrl+V 或長按貼上");
     }
 
     private Uri saveToMediaStore(Bitmap bitmap) {
@@ -109,7 +110,7 @@ public class ClipboardService extends Service {
             return uri;
 
         } catch (Exception e) {
-            Log.e(ClipboardReceiver.TAG, "saveToMediaStore failed", e);
+            Log.e(ClipboardReceiver.TAG, "MediaStore failed: " + e.getMessage());
             if (uri != null) getContentResolver().delete(uri, null, null);
             return null;
         }
