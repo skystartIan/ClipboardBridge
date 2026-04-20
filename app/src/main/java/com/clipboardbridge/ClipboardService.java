@@ -14,15 +14,13 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.provider.MediaStore;
+import android.util.Base64;
 import android.util.Log;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
 import java.io.OutputStream;
 
 public class ClipboardService extends Service {
@@ -35,56 +33,54 @@ public class ClipboardService extends Service {
         startForeground(NOTIF_ID, buildNotification("Processing..."));
 
         if (intent != null) {
-            String path = intent.getStringExtra(ClipboardReceiver.EXTRA_IMAGE_PATH);
-            if (path != null) handleImage(path);
+            String b64 = intent.getStringExtra(ClipboardReceiver.EXTRA_IMAGE_DATA);
+            if (b64 != null && !b64.isEmpty()) {
+                handleBase64(b64);
+            }
         }
 
         stopSelf();
         return START_NOT_STICKY;
     }
 
-    private void handleImage(String imagePath) {
-        Log.d(ClipboardReceiver.TAG, "handleImage: " + imagePath);
+    private void handleBase64(String b64) {
+        Log.d(ClipboardReceiver.TAG, "handleBase64: length=" + b64.length());
 
-        // 用 App 私有目錄，不需要任何讀寫權限
-        File file = new File(getFilesDir(), "cb_tmp.png");
-        Log.d(ClipboardReceiver.TAG, "Reading: " + file.getAbsolutePath() + " exists=" + file.exists());
-
-        if (!file.exists()) {
-            toast("Error: file not found in " + getFilesDir());
-            return;
-        }
-
-        Bitmap bitmap = null;
         try {
-            InputStream is = new FileInputStream(file);
-            bitmap = BitmapFactory.decodeStream(is);
-            is.close();
+            // base64 → byte[]
+            byte[] bytes = Base64.decode(b64, Base64.NO_WRAP);
+            Log.d(ClipboardReceiver.TAG, "Decoded bytes: " + bytes.length);
+
+            // byte[] → Bitmap（全在記憶體，不碰任何檔案）
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            if (bitmap == null) {
+                toast("Error: cannot decode bitmap");
+                return;
+            }
+
+            Log.d(ClipboardReceiver.TAG, "Bitmap: " + bitmap.getWidth() + "x" + bitmap.getHeight());
+
+            // Bitmap → MediaStore URI
+            Uri uri = saveToMediaStore(bitmap);
+            bitmap.recycle();
+
+            if (uri == null) {
+                toast("Error: MediaStore failed");
+                return;
+            }
+
+            // URI → Clipboard
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm == null) return;
+
+            cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
+            Log.d(ClipboardReceiver.TAG, "✓ Clipboard set: " + uri);
+            toast("✓ 圖片已就緒，按 Ctrl+V 或長按貼上");
+
         } catch (Exception e) {
-            Log.e(ClipboardReceiver.TAG, "decode failed: " + e.getMessage());
+            Log.e(ClipboardReceiver.TAG, "handleBase64 failed: " + e.getMessage());
             toast("Error: " + e.getMessage());
-            return;
         }
-
-        if (bitmap == null) {
-            toast("Error: bitmap null");
-            return;
-        }
-
-        Uri uri = saveToMediaStore(bitmap);
-        bitmap.recycle();
-
-        if (uri == null) {
-            toast("Error: MediaStore failed");
-            return;
-        }
-
-        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        if (cm == null) return;
-
-        cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
-        Log.d(ClipboardReceiver.TAG, "✓ Clipboard set: " + uri);
-        toast("✓ 圖片已就緒，按 Ctrl+V 或長按貼上");
     }
 
     private Uri saveToMediaStore(Bitmap bitmap) {

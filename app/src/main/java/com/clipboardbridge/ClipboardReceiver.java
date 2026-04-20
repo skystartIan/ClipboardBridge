@@ -10,22 +10,22 @@ public class ClipboardReceiver extends BroadcastReceiver {
 
     static final String TAG = "ClipboardBridge";
     static final String ACTION_SET_IMAGE = "com.clipboardbridge.SET_IMAGE";
-    static final String EXTRA_IMAGE_PATH = "image_path";
+    static final String EXTRA_IMAGE_DATA = "image_data";  // base64
 
     @Override
     public void onReceive(Context context, Intent intent) {
         if (!ACTION_SET_IMAGE.equals(intent.getAction())) return;
 
-        String imagePath = intent.getStringExtra(EXTRA_IMAGE_PATH);
-        if (imagePath == null || imagePath.isEmpty()) {
-            Log.e(TAG, "image_path is empty");
+        String imageData = intent.getStringExtra(EXTRA_IMAGE_DATA);
+        if (imageData == null || imageData.isEmpty()) {
+            Log.e(TAG, "image_data is empty");
             return;
         }
 
-        Log.d(TAG, "Received SET_IMAGE: " + imagePath);
+        Log.d(TAG, "Received SET_IMAGE, data length=" + imageData.length());
 
         Intent serviceIntent = new Intent(context, ClipboardService.class);
-        serviceIntent.putExtra(EXTRA_IMAGE_PATH, imagePath);
+        serviceIntent.putExtra(EXTRA_IMAGE_DATA, imageData);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(serviceIntent);
