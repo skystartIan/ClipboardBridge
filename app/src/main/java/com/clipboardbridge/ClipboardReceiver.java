@@ -3,14 +3,13 @@ package com.clipboardbridge;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
 import android.util.Log;
 
 public class ClipboardReceiver extends BroadcastReceiver {
 
     static final String TAG = "ClipboardBridge";
     static final String ACTION_SET_IMAGE = "com.clipboardbridge.SET_IMAGE";
-    static final String EXTRA_IMAGE_DATA = "image_data";  // base64
+    static final String EXTRA_IMAGE_DATA = "image_data";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -24,13 +23,11 @@ public class ClipboardReceiver extends BroadcastReceiver {
 
         Log.d(TAG, "Received SET_IMAGE, data length=" + imageData.length());
 
-        Intent serviceIntent = new Intent(context, ClipboardService.class);
-        serviceIntent.putExtra(EXTRA_IMAGE_DATA, imageData);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(serviceIntent);
-        } else {
-            context.startService(serviceIntent);
-        }
+        // 啟動透明 Activity 來設定剪貼簿（繞過背景限制）
+        Intent actIntent = new Intent(context, ClipboardActivity.class);
+        actIntent.putExtra(ClipboardActivity.EXTRA_IMAGE_DATA, imageData);
+        actIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        actIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        context.startActivity(actIntent);
     }
 }
