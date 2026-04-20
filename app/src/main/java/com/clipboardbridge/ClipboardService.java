@@ -21,6 +21,8 @@ import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 
 public class ClipboardService extends Service {
@@ -42,17 +44,29 @@ public class ClipboardService extends Service {
     }
 
     private void handleImage(String imagePath) {
+        Log.d(ClipboardReceiver.TAG, "handleImage: " + imagePath);
+
         File file = new File(imagePath);
         if (!file.exists()) {
             Log.e(ClipboardReceiver.TAG, "File not found: " + imagePath);
-            toast("Error: file not found");
+            toast("Error: file not found: " + imagePath);
             return;
         }
 
-        Bitmap bitmap = BitmapFactory.decodeFile(imagePath);
+        Bitmap bitmap = null;
+        try {
+            // 用 FileInputStream 直接讀，避免路徑權限問題
+            InputStream is = new FileInputStream(file);
+            bitmap = BitmapFactory.decodeStream(is);
+            is.close();
+        } catch (Exception e) {
+            Log.e(ClipboardReceiver.TAG, "decode failed", e);
+            toast("Error: decode failed: " + e.getMessage());
+            return;
+        }
+
         if (bitmap == null) {
-            Log.e(ClipboardReceiver.TAG, "Cannot decode: " + imagePath);
-            toast("Error: cannot decode image");
+            toast("Error: bitmap is null");
             return;
         }
 
