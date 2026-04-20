@@ -117,7 +117,7 @@ public class ClipboardService extends Service {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Clipboard Bridge")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_menu_clipboard)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build();
     }
