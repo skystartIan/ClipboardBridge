@@ -20,7 +20,7 @@
             </intent-filter>
         </activity>
 
-        <!-- 透明 Activity，用來設定剪貼簿 -->
+        <!-- 透明 Activity 設定剪貼簿 -->
         <activity
             android:name=".ClipboardActivity"
             android:exported="false"
@@ -48,6 +48,15 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- Shizuku provider -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="com.clipboardbridge.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
     </application>
 
