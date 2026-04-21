@@ -7,8 +7,6 @@ import android.content.ContentValues;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
-import android.os.Binder;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.provider.MediaStore;
@@ -45,13 +43,11 @@ public class ClipboardActivity extends Activity {
 
             boolean success = false;
 
-            // 嘗試 Shizuku + ShizukuBinderWrapper
             if (isShizukuAvailable()) {
                 success = setClipboardViaShizuku(uri);
                 Log.d(ClipboardReceiver.TAG, "Shizuku result: " + success);
             }
 
-            // 備用：一般 ClipboardManager
             if (!success) {
                 ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                 if (cm != null) {
@@ -82,7 +78,6 @@ public class ClipboardActivity extends Activity {
 
     private boolean setClipboardViaShizuku(Uri imageUri) {
         try {
-            // 用 ShizukuBinderWrapper 以 shell 身份取得 clipboard binder
             IBinder originalBinder = SystemServiceHelper.getSystemService("clipboard");
             if (originalBinder == null) {
                 Log.e(ClipboardReceiver.TAG, "Cannot get clipboard binder");
@@ -90,57 +85,59 @@ public class ClipboardActivity extends Activity {
             }
 
             ShizukuBinderWrapper binderWrapper = new ShizukuBinderWrapper(originalBinder);
-
-            // 用反射取得 IClipboard.Stub.asInterface
             Class<?> stubClass = Class.forName("android.content.IClipboard$Stub");
             Method asInterface = stubClass.getMethod("asInterface", IBinder.class);
             Object iClipboard = asInterface.invoke(null, binderWrapper);
 
-            // 建立 ClipData
+            // 列出所有方法，找到正確的 setPrimaryClip
+            Log.d(ClipboardReceiver.TAG, "=== IClipboard methods ===");
+            for (Method m : iClipboard.getClass().getMethods()) {
+                if (m.getName().contains("setPrimary") || m.getName().contains("Clip")) {
+                    StringBuilder sb = new StringBuilder(m.getName() + "(");
+                    for (Class<?> p : m.getParameterTypes()) sb.append(p.getSimpleName()).append(",");
+                    sb.append(")");
+                    Log.d(ClipboardReceiver.TAG, "  method: " + sb);
+                }
+            }
+
             ClipData clip = ClipData.newUri(getContentResolver(), "image", imageUri);
 
-            // 呼叫 setPrimaryClipAsPackage 或 setPrimaryClip
-            // Android 版本不同，方法簽章不同，逐一嘗試
-            boolean called = false;
-
-            // Android 12+ 
-            try {
-                Method m = iClipboard.getClass().getMethod(
-                    "setPrimaryClipAsPackage", ClipData.class, String.class, int.class, String.class);
-                m.invoke(iClipboard, clip, "com.android.shell", 0, "com.android.shell");
-                called = true;
-                Log.d(ClipboardReceiver.TAG, "✓ setPrimaryClipAsPackage");
-            } catch (Exception e) {
-                Log.w(ClipboardReceiver.TAG, "setPrimaryClipAsPackage failed: " + e.getMessage());
-            }
-
-            // Android 10-11
-            if (!called) {
+            // 嘗試所有可能的簽章
+            for (Method m : iClipboard.getClass().getMethods()) {
+                if (!m.getName().equals("setPrimaryClip") && !m.getName().equals("setPrimaryClipAsPackage")) continue;
+                
+                Class<?>[] params = m.getParameterTypes();
+                Log.d(ClipboardReceiver.TAG, "Trying: " + m.getName() + " params=" + params.length);
+                
                 try {
-                    Method m = iClipboard.getClass().getMethod(
-                        "setPrimaryClip", ClipData.class, String.class, int.class);
-                    m.invoke(iClipboard, clip, "com.android.shell", 0);
-                    called = true;
-                    Log.d(ClipboardReceiver.TAG, "✓ setPrimaryClip(3 args)");
+                    switch (params.length) {
+                        case 1:
+                            m.invoke(iClipboard, clip);
+                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(1)");
+                            return true;
+                        case 2:
+                            m.invoke(iClipboard, clip, "com.android.shell");
+                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(2)");
+                            return true;
+                        case 3:
+                            m.invoke(iClipboard, clip, "com.android.shell", 0);
+                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(3)");
+                            return true;
+                        case 4:
+                            m.invoke(iClipboard, clip, "com.android.shell", 0, "com.android.shell");
+                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(4)");
+                            return true;
+                        case 5:
+                            m.invoke(iClipboard, clip, "com.android.shell", "com.android.shell", 0, "com.android.shell");
+                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(5)");
+                            return true;
+                    }
                 } catch (Exception e) {
-                    Log.w(ClipboardReceiver.TAG, "setPrimaryClip(3) failed: " + e.getMessage());
+                    Log.w(ClipboardReceiver.TAG, m.getName() + "(" + params.length + ") failed: " + e.getMessage());
                 }
             }
 
-            // fallback
-            if (!called) {
-                try {
-                    Method m = iClipboard.getClass().getMethod(
-                        "setPrimaryClip", ClipData.class, String.class);
-                    m.invoke(iClipboard, clip, "com.android.shell");
-                    called = true;
-                    Log.d(ClipboardReceiver.TAG, "✓ setPrimaryClip(2 args)");
-                } catch (Exception e) {
-                    Log.w(ClipboardReceiver.TAG, "setPrimaryClip(2) failed: " + e.getMessage());
-                }
-            }
-
-            return called;
+            return false;
 
         } catch (Exception e) {
             Log.e(ClipboardReceiver.TAG, "Shizuku failed: " + e.getMessage());
