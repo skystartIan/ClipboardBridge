@@ -3,6 +3,7 @@ package com.clipboardbridge;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.util.Log;
 
 public class ClipboardReceiver extends BroadcastReceiver {
@@ -23,11 +24,13 @@ public class ClipboardReceiver extends BroadcastReceiver {
 
         Log.d(TAG, "Received SET_IMAGE, data length=" + imageData.length());
 
-        // 啟動透明 Activity 來設定剪貼簿（繞過背景限制）
-        Intent actIntent = new Intent(context, ClipboardActivity.class);
-        actIntent.putExtra(ClipboardActivity.EXTRA_IMAGE_DATA, imageData);
-        actIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        actIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        context.startActivity(actIntent);
+        // 先啟動前景 Service（它有權限啟動 Activity）
+        Intent serviceIntent = new Intent(context, ClipboardService.class);
+        serviceIntent.putExtra(EXTRA_IMAGE_DATA, imageData);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(serviceIntent);
+        } else {
+            context.startService(serviceIntent);
+        }
     }
 }
