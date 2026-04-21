@@ -8,16 +8,19 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.IBinder;
+import android.os.IInterface;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
 import android.widget.Toast;
 
-import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 
 import rikka.shizuku.Shizuku;
-import rikka.shizuku.ShizukuRemoteProcess;
+import rikka.shizuku.ShizukuBinderWrapper;
+import rikka.shizuku.SystemServiceHelper;
 
 public class ClipboardActivity extends Activity {
 
@@ -28,10 +31,7 @@ public class ClipboardActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         String b64 = getIntent().getStringExtra(EXTRA_IMAGE_DATA);
-        if (b64 == null || b64.isEmpty()) {
-            finish();
-            return;
-        }
+        if (b64 == null || b64.isEmpty()) { finish(); return; }
 
         try {
             byte[] bytes = Base64.decode(b64, Base64.NO_WRAP);
@@ -44,9 +44,10 @@ public class ClipboardActivity extends Activity {
 
             boolean success = false;
 
-            // 嘗試 Shizuku
+            // 嘗試 Shizuku 寫入 semclipboard
             if (isShizukuAvailable()) {
                 success = setClipboardViaShizuku(uri);
+                Log.d(ClipboardReceiver.TAG, "Shizuku result: " + success);
             }
 
             // 備用：一般 ClipboardManager
@@ -55,7 +56,7 @@ public class ClipboardActivity extends Activity {
                 if (cm != null) {
                     cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
                     success = true;
-                    Log.d(ClipboardReceiver.TAG, "✓ Set via ClipboardManager: " + uri);
+                    Log.d(ClipboardReceiver.TAG, "✓ Set via ClipboardManager");
                 }
             }
 
@@ -80,29 +81,30 @@ public class ClipboardActivity extends Activity {
 
     private boolean setClipboardViaShizuku(Uri imageUri) {
         try {
-            // 用 Shizuku 執行 shell 指令寫入 Samsung semclipboard
-            String[] cmd = new String[]{
-                "sh", "-c",
-                "content insert --uri content://com.sec.android.semclipboardprovider/images " +
-                "--bind image_uri:s:" + imageUri.toString()
-            };
+            // 用 Shizuku 取得 clipboard service 的 binder
+            // 以 shell 身份操作，可以繞過 Samsung semclipboard 的權限
+            IBinder binder = SystemServiceHelper.getSystemService("clipboard");
+            ShizukuBinderWrapper wrapper = new ShizukuBinderWrapper(binder);
 
-            ShizukuRemoteProcess process = Shizuku.newProcess(cmd, null, null);
-            int exit = process.waitFor();
-            Log.d(ClipboardReceiver.TAG, "Shizuku semclipboard exit=" + exit);
+            // 用反射取得 IClipboard 介面
+            Class<?> iClipboardClass = Class.forName("android.content.IClipboard");
+            Method asInterface = iClipboardClass.getMethod("Stub.asInterface", IBinder.class);
+            // 取得 stub
+            Class<?> stubClass = Class.forName("android.content.IClipboard$Stub");
+            Method asInterfaceMethod = stubClass.getMethod("asInterface", IBinder.class);
+            IInterface clipboard = (IInterface) asInterfaceMethod.invoke(null, wrapper);
 
-            // 讀取 stderr 看有沒有錯誤
-            InputStream err = process.getErrorStream();
-            byte[] buf = new byte[512];
-            int n = err.read(buf);
-            if (n > 0) {
-                Log.w(ClipboardReceiver.TAG, "Shizuku stderr: " + new String(buf, 0, n));
-            }
+            // setPrimaryClip(ClipData clip, String callingPackage, int userId)
+            ClipData clip = ClipData.newUri(getContentResolver(), "image", imageUri);
+            Method setPrimaryClip = clipboard.getClass().getMethod(
+                "setPrimaryClip", ClipData.class, String.class, int.class);
+            setPrimaryClip.invoke(clipboard, clip, "com.android.shell", 0);
 
-            return exit == 0;
+            Log.d(ClipboardReceiver.TAG, "✓ Set via Shizuku+reflection");
+            return true;
 
         } catch (Exception e) {
-            Log.e(ClipboardReceiver.TAG, "Shizuku failed: " + e.getMessage());
+            Log.e(ClipboardReceiver.TAG, "Shizuku reflection failed: " + e.getMessage());
             return false;
         }
     }
