@@ -38,8 +38,8 @@ configurations.all {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.core:core:1.12.0'
-
-    // Shizuku API
     implementation 'dev.rikka.shizuku:api:13.1.5'
     implementation 'dev.rikka.shizuku:provider:13.1.5'
+    // Hidden API bypass
+    implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'
 }

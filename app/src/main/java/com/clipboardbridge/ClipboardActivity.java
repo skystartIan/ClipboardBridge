@@ -7,6 +7,7 @@ import android.content.ContentValues;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.provider.MediaStore;
@@ -14,8 +15,11 @@ import android.util.Base64;
 import android.util.Log;
 import android.widget.Toast;
 
+import org.lsposed.hiddenapibypass.HiddenApiBypass;
+
 import java.io.OutputStream;
 import java.lang.reflect.Method;
+import java.util.List;
 
 import rikka.shizuku.Shizuku;
 import rikka.shizuku.ShizukuBinderWrapper;
@@ -28,6 +32,11 @@ public class ClipboardActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // 啟用 Hidden API bypass
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            HiddenApiBypass.addHiddenApiExemptions("");
+        }
 
         String b64 = getIntent().getStringExtra(EXTRA_IMAGE_DATA);
         if (b64 == null || b64.isEmpty()) { finish(); return; }
@@ -89,51 +98,38 @@ public class ClipboardActivity extends Activity {
             Method asInterface = stubClass.getMethod("asInterface", IBinder.class);
             Object iClipboard = asInterface.invoke(null, binderWrapper);
 
-            // 列出所有方法（包含繼承的）
-            Log.d(ClipboardReceiver.TAG, "=== All methods on " + iClipboard.getClass().getName() + " ===");
-            for (Method m : iClipboard.getClass().getMethods()) {
-                Log.d(ClipboardReceiver.TAG, "  M: " + m.getName() + " params=" + m.getParameterTypes().length);
+            // 用 HiddenApiBypass 列出所有方法
+            List<Method> methods = (List<Method>) HiddenApiBypass.getDeclaredMethods(iClipboard.getClass());
+            Log.d(ClipboardReceiver.TAG, "=== Methods via HiddenApiBypass (" + methods.size() + ") ===");
+            for (Method m : methods) {
+                Log.d(ClipboardReceiver.TAG, "  HM: " + m.getName() + " params=" + m.getParameterTypes().length);
             }
 
             ClipData clip = ClipData.newUri(getContentResolver(), "image", imageUri);
 
-            // 嘗試所有方法
-            for (Method m : iClipboard.getClass().getMethods()) {
-                String name = m.getName();
-                if (!name.contains("set") && !name.contains("Set")) continue;
-                if (!name.toLowerCase().contains("clip") && !name.toLowerCase().contains("primary")) continue;
+            // 嘗試所有包含 set/clip/primary 的方法
+            for (Method m : methods) {
+                String name = m.getName().toLowerCase();
+                if (!name.contains("set")) continue;
+                if (!name.contains("clip") && !name.contains("primary")) continue;
 
+                m.setAccessible(true);
                 Class<?>[] params = m.getParameterTypes();
-                Log.d(ClipboardReceiver.TAG, "Trying: " + name + "(" + params.length + ")");
+                Log.d(ClipboardReceiver.TAG, "Trying: " + m.getName() + " params=" + params.length);
 
                 try {
                     switch (params.length) {
-                        case 1:
-                            m.invoke(iClipboard, clip);
-                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(1)");
-                            return true;
-                        case 2:
-                            if (params[1] == String.class)
-                                m.invoke(iClipboard, clip, "com.android.shell");
-                            else if (params[1] == int.class)
-                                m.invoke(iClipboard, clip, 0);
-                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(2)");
-                            return true;
-                        case 3:
-                            m.invoke(iClipboard, clip, "com.android.shell", 0);
-                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(3)");
-                            return true;
-                        case 4:
-                            m.invoke(iClipboard, clip, "com.android.shell", 0, "com.android.shell");
-                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(4)");
-                            return true;
-                        case 5:
-                            m.invoke(iClipboard, clip, "com.android.shell", "com.android.shell", 0, "com.android.shell");
-                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(5)");
-                            return true;
+                        case 1: m.invoke(iClipboard, clip); break;
+                        case 2: m.invoke(iClipboard, clip, "com.android.shell"); break;
+                        case 3: m.invoke(iClipboard, clip, "com.android.shell", 0); break;
+                        case 4: m.invoke(iClipboard, clip, "com.android.shell", 0, "com.android.shell"); break;
+                        case 5: m.invoke(iClipboard, clip, "com.android.shell", "com.android.shell", 0, "com.android.shell"); break;
+                        default: continue;
                     }
+                    Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(" + params.length + ")");
+                    return true;
                 } catch (Exception e) {
-                    Log.w(ClipboardReceiver.TAG, name + "(" + params.length + ") ex: " + e.getMessage());
+                    Log.w(ClipboardReceiver.TAG, m.getName() + "(" + params.length + ") failed: " + e.getMessage());
                 }
             }
 
