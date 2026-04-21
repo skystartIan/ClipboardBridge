@@ -24,68 +24,34 @@ public class NotificationService extends NotificationListenerService {
 
     private static final String TAG = "CBNotification";
     private static final int PC_PORT = 9999;
+    private static final String IP_FILE = "/sdcard/cb_pc_ip.txt";
     private String pcHost = null;
 
     @Override
     public void onCreate() {
         super.onCreate();
-        new Thread(this::detectPcIp).start();
+        detectPcIp();
     }
 
     private void detectPcIp() {
-        // 從 /proc/net/tcp6 取得 ADB 連線的 PC IP
-        // ADB port 5555 = 0x15B3
         try {
-            BufferedReader br = new BufferedReader(new FileReader("/proc/net/tcp6"));
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (!line.contains("15B3")) continue;
-                // 格式: sl local_addr:port rem_addr:port state
-                // 找 state=01 (ESTABLISHED) 且 local 含 15B3
-                String[] parts = line.trim().split("\\s+");
-                if (parts.length < 4) continue;
-                String local = parts[1];  // local_addr:port
-                String remote = parts[2]; // rem_addr:port
-                String state = parts[3];  // state
-
-                // state 01 = ESTABLISHED
-                if (!"01".equals(state)) continue;
-                // local port 是 15B3 (5555)
-                if (!local.endsWith(":15B3")) continue;
-
-                // remote addr 是 PC 的 IP（hex，little-endian）
-                String remHex = remote.split(":")[0];
-                // 取最後 8 個字元（IPv4 mapped in IPv6）
-                if (remHex.length() >= 8) {
-                    remHex = remHex.substring(remHex.length() - 8);
-                }
-                // 轉換 little-endian hex 到 IP
-                int b1 = Integer.parseInt(remHex.substring(6, 8), 16);
-                int b2 = Integer.parseInt(remHex.substring(4, 6), 16);
-                int b3 = Integer.parseInt(remHex.substring(2, 4), 16);
-                int b4 = Integer.parseInt(remHex.substring(0, 2), 16);
-                String ip = b1 + "." + b2 + "." + b3 + "." + b4;
-
-                if (!ip.equals("0.0.0.0") && !ip.startsWith("0.")) {
-                    pcHost = ip;
-                    Log.d(TAG, "Detected PC IP: " + pcHost);
-                    br.close();
-                    return;
-                }
-            }
+            BufferedReader br = new BufferedReader(new FileReader(IP_FILE));
+            String ip = br.readLine();
             br.close();
-            Log.w(TAG, "Could not detect PC IP from tcp6");
+            if (ip != null && !ip.trim().isEmpty()) {
+                pcHost = ip.trim();
+                Log.d(TAG, "PC IP loaded: " + pcHost);
+            }
         } catch (Exception e) {
-            Log.e(TAG, "detectPcIp error: " + e.getMessage());
+            Log.w(TAG, "Cannot read PC IP file: " + e.getMessage());
         }
     }
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
-        if (pcHost == null) {
-            new Thread(this::detectPcIp).start();
-            return;
-        }
+        // 每次通知都重新讀 IP（確保最新）
+        if (pcHost == null) detectPcIp();
+        if (pcHost == null) return;
 
         try {
             String pkg = sbn.getPackageName();
@@ -138,18 +104,18 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private void sendToPC(final String data) {
+        final String host = pcHost;
         new Thread(() -> {
             try {
-                Socket socket = new Socket(pcHost, PC_PORT);
+                Socket socket = new Socket(host, PC_PORT);
                 socket.setSoTimeout(3000);
                 OutputStream out = socket.getOutputStream();
                 out.write((data + "\n").getBytes("UTF-8"));
                 out.flush();
                 socket.close();
             } catch (Exception e) {
-                Log.w(TAG, "sendToPC(" + pcHost + ") failed: " + e.getMessage());
+                Log.w(TAG, "sendToPC(" + host + ") failed: " + e.getMessage());
                 pcHost = null;
-                new Thread(this::detectPcIp).start();
             }
         }).start();
     }
