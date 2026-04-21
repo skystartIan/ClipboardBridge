@@ -24,13 +24,31 @@ public class ClipboardReceiver extends BroadcastReceiver {
 
         Log.d(TAG, "Received SET_IMAGE, data length=" + imageData.length());
 
-        // 先啟動前景 Service（它有權限啟動 Activity）
         Intent serviceIntent = new Intent(context, ClipboardService.class);
         serviceIntent.putExtra(EXTRA_IMAGE_DATA, imageData);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(serviceIntent);
-        } else {
-            context.startService(serviceIntent);
-        }
+
+        // Android 14+ 需要 RECEIVER_EXPORTED + 特殊處理
+        // 用 goAsync() 讓 receiver 保持活躍，然後在背景執行
+        final PendingResult result = goAsync();
+
+        new Thread(() -> {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent);
+                } else {
+                    context.startService(serviceIntent);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "startForegroundService failed: " + e.getMessage());
+                // 備用：直接在這裡處理
+                try {
+                    ClipboardService.processInBackground(context, imageData);
+                } catch (Exception e2) {
+                    Log.e(TAG, "Background processing also failed: " + e2.getMessage());
+                }
+            } finally {
+                result.finish();
+            }
+        }).start();
     }
 }
