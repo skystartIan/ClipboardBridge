@@ -28,8 +28,6 @@ public class NotificationService extends NotificationListenerService {
     public void onNotificationPosted(StatusBarNotification sbn) {
         try {
             String pkg = sbn.getPackageName();
-
-            // 過濾系統通知
             if (pkg.startsWith("android") || pkg.equals("com.android.systemui")) return;
 
             Notification notification = sbn.getNotification();
@@ -41,15 +39,16 @@ public class NotificationService extends NotificationListenerService {
 
             if (title.isEmpty() && text.isEmpty()) return;
 
-            // 取得 App 名稱
             String appName = pkg;
             try {
                 PackageManager pm = getPackageManager();
                 ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
                 appName = pm.getApplicationLabel(ai).toString();
-            } catch (Exception e) { /* 用 package name */ }
+            } catch (Exception e) { }
 
-            // 取得 App 圖示（轉 base64）
+            Log.d(TAG, "Notification: " + appName + " - " + title);
+
+            // 取得圖示
             String iconB64 = "";
             try {
                 PackageManager pm = getPackageManager();
@@ -62,9 +61,10 @@ public class NotificationService extends NotificationListenerService {
                 bmp.compress(Bitmap.CompressFormat.PNG, 80, baos);
                 iconB64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
                 bmp.recycle();
-            } catch (Exception e) { /* 沒有圖示 */ }
+            } catch (Exception e) {
+                Log.w(TAG, "Icon failed: " + e.getMessage());
+            }
 
-            // 組成 JSON
             JSONObject json = new JSONObject();
             json.put("pkg", pkg);
             json.put("app", appName);
@@ -73,9 +73,7 @@ public class NotificationService extends NotificationListenerService {
             json.put("icon", iconB64);
             json.put("time", System.currentTimeMillis());
 
-            Log.d(TAG, "Notification: " + appName + " - " + title);
-
-            // 傳送到 PC（透過 adb reverse 的 localhost:9999）
+            Log.d(TAG, "Sending to PC: " + PC_HOST + ":" + PC_PORT);
             sendToPC(json.toString());
 
         } catch (Exception e) {
@@ -86,19 +84,20 @@ public class NotificationService extends NotificationListenerService {
     private void sendToPC(final String data) {
         new Thread(() -> {
             try {
+                Log.d(TAG, "Connecting to " + PC_HOST + ":" + PC_PORT);
                 Socket socket = new Socket(PC_HOST, PC_PORT);
+                Log.d(TAG, "Connected! Sending data...");
                 OutputStream out = socket.getOutputStream();
                 out.write((data + "\n").getBytes("UTF-8"));
                 out.flush();
                 socket.close();
+                Log.d(TAG, "Sent successfully");
             } catch (Exception e) {
-                Log.w(TAG, "sendToPC failed: " + e.getMessage());
+                Log.e(TAG, "sendToPC failed: " + e.getMessage());
             }
         }).start();
     }
 
     @Override
-    public void onNotificationRemoved(StatusBarNotification sbn) {
-        // 不需要處理
-    }
+    public void onNotificationRemoved(StatusBarNotification sbn) { }
 }
