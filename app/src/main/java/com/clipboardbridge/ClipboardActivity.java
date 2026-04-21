@@ -89,54 +89,55 @@ public class ClipboardActivity extends Activity {
             Method asInterface = stubClass.getMethod("asInterface", IBinder.class);
             Object iClipboard = asInterface.invoke(null, binderWrapper);
 
-            // 列出所有方法，找到正確的 setPrimaryClip
-            Log.d(ClipboardReceiver.TAG, "=== IClipboard methods ===");
+            // 列出所有方法（包含繼承的）
+            Log.d(ClipboardReceiver.TAG, "=== All methods on " + iClipboard.getClass().getName() + " ===");
             for (Method m : iClipboard.getClass().getMethods()) {
-                if (m.getName().contains("setPrimary") || m.getName().contains("Clip")) {
-                    StringBuilder sb = new StringBuilder(m.getName() + "(");
-                    for (Class<?> p : m.getParameterTypes()) sb.append(p.getSimpleName()).append(",");
-                    sb.append(")");
-                    Log.d(ClipboardReceiver.TAG, "  method: " + sb);
-                }
+                Log.d(ClipboardReceiver.TAG, "  M: " + m.getName() + " params=" + m.getParameterTypes().length);
             }
 
             ClipData clip = ClipData.newUri(getContentResolver(), "image", imageUri);
 
-            // 嘗試所有可能的簽章
+            // 嘗試所有方法
             for (Method m : iClipboard.getClass().getMethods()) {
-                if (!m.getName().equals("setPrimaryClip") && !m.getName().equals("setPrimaryClipAsPackage")) continue;
-                
+                String name = m.getName();
+                if (!name.contains("set") && !name.contains("Set")) continue;
+                if (!name.toLowerCase().contains("clip") && !name.toLowerCase().contains("primary")) continue;
+
                 Class<?>[] params = m.getParameterTypes();
-                Log.d(ClipboardReceiver.TAG, "Trying: " + m.getName() + " params=" + params.length);
-                
+                Log.d(ClipboardReceiver.TAG, "Trying: " + name + "(" + params.length + ")");
+
                 try {
                     switch (params.length) {
                         case 1:
                             m.invoke(iClipboard, clip);
-                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(1)");
+                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(1)");
                             return true;
                         case 2:
-                            m.invoke(iClipboard, clip, "com.android.shell");
-                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(2)");
+                            if (params[1] == String.class)
+                                m.invoke(iClipboard, clip, "com.android.shell");
+                            else if (params[1] == int.class)
+                                m.invoke(iClipboard, clip, 0);
+                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(2)");
                             return true;
                         case 3:
                             m.invoke(iClipboard, clip, "com.android.shell", 0);
-                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(3)");
+                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(3)");
                             return true;
                         case 4:
                             m.invoke(iClipboard, clip, "com.android.shell", 0, "com.android.shell");
-                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(4)");
+                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(4)");
                             return true;
                         case 5:
                             m.invoke(iClipboard, clip, "com.android.shell", "com.android.shell", 0, "com.android.shell");
-                            Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(5)");
+                            Log.d(ClipboardReceiver.TAG, "✓ " + name + "(5)");
                             return true;
                     }
                 } catch (Exception e) {
-                    Log.w(ClipboardReceiver.TAG, m.getName() + "(" + params.length + ") failed: " + e.getMessage());
+                    Log.w(ClipboardReceiver.TAG, name + "(" + params.length + ") ex: " + e.getMessage());
                 }
             }
 
+            Log.e(ClipboardReceiver.TAG, "No suitable method found");
             return false;
 
         } catch (Exception e) {
