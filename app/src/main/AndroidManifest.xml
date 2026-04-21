@@ -49,14 +49,13 @@
             </intent-filter>
         </receiver>
 
-        <!-- Shizuku provider -->
+        <!-- Shizuku provider - 正確設定，不加系統權限 -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="com.clipboardbridge.shizuku"
             android:multiprocess="false"
             android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+            android:exported="true" />
 
     </application>
 
