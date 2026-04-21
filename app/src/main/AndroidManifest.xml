@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:label="ClipboardBridge"
@@ -19,13 +20,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- 透明 Activity 設定剪貼簿 -->
-        <activity
-            android:name=".ClipboardActivity"
-            android:exported="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
-            android:excludeFromRecents="true" />
 
         <receiver
             android:name=".ClipboardReceiver"
@@ -49,7 +43,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- Shizuku provider - 正確設定，不加系統權限 -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="com.clipboardbridge.shizuku"
