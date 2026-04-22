@@ -29,6 +29,8 @@ public class NotificationService extends NotificationListenerService {
     private static final int PC_PORT = 9999;
     private static final String ACTION_SET_PC_IP = "com.clipboardbridge.SET_PC_IP";
     private String pcHost = null;
+    private final java.util.Map<String, Long> recentNotifs = new java.util.HashMap<>();
+    private static final long DEDUP_MS = 2000; // 2秒內相同通知只傳一次
 
     private final BroadcastReceiver ipReceiver = new BroadcastReceiver() {
         @Override
@@ -120,6 +122,17 @@ public class NotificationService extends NotificationListenerService {
             json.put("text", text);
             json.put("icon", iconB64);
             json.put("time", System.currentTimeMillis());
+
+            // 去重複：同一則通知 2 秒內只傳一次
+            String dedupKey = pkg + "|" + title + "|" + text;
+            long now = System.currentTimeMillis();
+            synchronized (recentNotifs) {
+                Long lastTime = recentNotifs.get(dedupKey);
+                if (lastTime != null && now - lastTime < DEDUP_MS) return;
+                recentNotifs.put(dedupKey, now);
+                // 清理過期的記錄
+                recentNotifs.entrySet().removeIf(e -> now - e.getValue() > 10000);
+            }
 
             Log.d(TAG, "Notification: " + appName + " - " + title + " -> " + pcHost);
             sendToPC(json.toString());
