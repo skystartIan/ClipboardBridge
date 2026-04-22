@@ -81,6 +81,17 @@ public class NotificationService extends NotificationListenerService {
 
             if (title.isEmpty() && text.isEmpty()) return;
 
+            // 過濾靜音通知（只傳重要度 >= DEFAULT 的通知）
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                try {
+                    android.app.NotificationManager nm = getSystemService(android.app.NotificationManager.class);
+                    android.app.NotificationChannel ch = nm.getNotificationChannel(notification.getChannelId());
+                    if (ch != null && ch.getImportance() <= android.app.NotificationManager.IMPORTANCE_LOW) {
+                        return;
+                    }
+                } catch (Exception e) { }
+            }
+
             String appName = pkg;
             try {
                 PackageManager pm = getPackageManager();
