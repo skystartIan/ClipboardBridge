@@ -1,11 +1,16 @@
 package com.clipboardbridge;
 
 import android.app.Notification;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
@@ -14,9 +19,7 @@ import android.util.Log;
 
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
-import java.io.FileReader;
 import java.io.OutputStream;
 import java.net.Socket;
 
@@ -24,34 +27,46 @@ public class NotificationService extends NotificationListenerService {
 
     private static final String TAG = "CBNotification";
     private static final int PC_PORT = 9999;
-    private static final String IP_FILE = "/sdcard/Android/data/com.clipboardbridge/files/cb_pc_ip.txt";
+    private static final String ACTION_SET_PC_IP = "com.clipboardbridge.SET_PC_IP";
     private String pcHost = null;
+
+    private final BroadcastReceiver ipReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (ACTION_SET_PC_IP.equals(intent.getAction())) {
+                String ip = intent.getStringExtra("pc_ip");
+                if (ip != null && !ip.isEmpty()) {
+                    pcHost = ip.trim();
+                    Log.d(TAG, "PC IP received: " + pcHost);
+                }
+            }
+        }
+    };
 
     @Override
     public void onCreate() {
         super.onCreate();
-        detectPcIp();
+        IntentFilter filter = new IntentFilter(ACTION_SET_PC_IP);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(ipReceiver, filter, RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(ipReceiver, filter);
+        }
+        Log.d(TAG, "NotificationService started, waiting for PC IP...");
     }
 
-    private void detectPcIp() {
-        try {
-            BufferedReader br = new BufferedReader(new FileReader(IP_FILE));
-            String ip = br.readLine();
-            br.close();
-            if (ip != null && !ip.trim().isEmpty()) {
-                pcHost = ip.trim();
-                Log.d(TAG, "PC IP loaded: " + pcHost);
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "Cannot read PC IP file: " + e.getMessage());
-        }
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        try { unregisterReceiver(ipReceiver); } catch (Exception e) { }
     }
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
-        // 每次通知都重新讀 IP（確保最新）
-        if (pcHost == null) detectPcIp();
-        if (pcHost == null) return;
+        if (pcHost == null) {
+            Log.w(TAG, "PC IP not set, dropping notification");
+            return;
+        }
 
         try {
             String pkg = sbn.getPackageName();
