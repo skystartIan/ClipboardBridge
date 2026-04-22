@@ -24,7 +24,7 @@ public class NotificationService extends NotificationListenerService {
 
     private static final String TAG = "CBNotification";
     private static final int PC_PORT = 9999;
-    private static final String IP_FILE = "/sdcard/cb_pc_ip.txt";
+    private static final String IP_FILE = "/data/data/com.clipboardbridge/files/cb_pc_ip.txt";
     private String pcHost = null;
 
     @Override
