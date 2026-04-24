@@ -35,8 +35,8 @@ public class ClipboardActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        // 啟用 Hidden API bypass
+        // 立刻移到背景，不顯示任何 UI
+        moveTaskToBack(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             HiddenApiBypass.addHiddenApiExemptions("");
         }
