@@ -96,12 +96,17 @@ public class ClipboardActivity extends Activity {
             boolean success = false;
 
             if (isShizukuAvailable()) {
+                Log.d(ClipboardReceiver.TAG, "Trying Shizuku...");
                 success = setClipboardViaShizuku(uri);
                 Log.d(ClipboardReceiver.TAG, "Shizuku result: " + success);
+            } else {
+                Log.d(ClipboardReceiver.TAG, "Shizuku not available");
             }
 
             if (!success) {
+                Log.d(ClipboardReceiver.TAG, "Trying ClipboardManager...");
                 ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                Log.d(ClipboardReceiver.TAG, "ClipboardManager: " + (cm != null ? "OK" : "NULL"));
                 if (cm != null) {
                     cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
                     success = true;
