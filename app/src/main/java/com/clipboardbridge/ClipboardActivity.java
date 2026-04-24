@@ -77,9 +77,17 @@ public class ClipboardActivity extends Activity {
         }
 
         try {
-            byte[] bytes = Base64.decode(b64, Base64.NO_WRAP);
+            // 清理換行符，確保 Base64 解碼正確
+            b64 = b64.replaceAll("[\\r\\n\\s]", "");
+            Log.d(ClipboardReceiver.TAG, "Decoding b64, length=" + b64.length());
+            byte[] bytes = Base64.decode(b64, Base64.DEFAULT);
+            Log.d(ClipboardReceiver.TAG, "Decoded bytes=" + bytes.length);
             Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-            if (bitmap == null) { toast("Error: decode failed"); finish(); return; }
+            if (bitmap == null) {
+                Log.e(ClipboardReceiver.TAG, "Bitmap decode failed");
+                finish(); return;
+            }
+            Log.d(ClipboardReceiver.TAG, "Bitmap: " + bitmap.getWidth() + "x" + bitmap.getHeight());
 
             Uri uri = saveToMediaStore(bitmap);
             bitmap.recycle();
