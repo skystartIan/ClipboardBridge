@@ -88,7 +88,7 @@ public class ClipboardActivity extends Activity {
                 finish(); return;
             }
             Log.d(ClipboardReceiver.TAG, "Bitmap: " + bitmap.getWidth() + "x" + bitmap.getHeight());
-
+            Log.d(ClipboardReceiver.TAG, "Calling saveToMediaStore...");
             Uri uri = saveToMediaStore(bitmap);
             bitmap.recycle();
             if (uri == null) { toast("Error: MediaStore failed"); finish(); return; }
@@ -184,17 +184,22 @@ public class ClipboardActivity extends Activity {
 
         Uri uri = null;
         try {
+            Log.d(ClipboardReceiver.TAG, "saveToMediaStore: inserting...");
             uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) return null;
+            Log.d(ClipboardReceiver.TAG, "saveToMediaStore: uri=" + uri);
+            if (uri == null) { Log.e(ClipboardReceiver.TAG, "saveToMediaStore: insert returned null"); return null; }
             try (OutputStream out = getContentResolver().openOutputStream(uri)) {
-                if (out == null) return null;
+                if (out == null) { Log.e(ClipboardReceiver.TAG, "saveToMediaStore: openOutputStream null"); return null; }
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+                Log.d(ClipboardReceiver.TAG, "saveToMediaStore: compress done");
             }
             values.clear();
             values.put(MediaStore.Images.Media.IS_PENDING, 0);
             getContentResolver().update(uri, values, null, null);
+            Log.d(ClipboardReceiver.TAG, "saveToMediaStore: success, uri=" + uri);
             return uri;
         } catch (Exception e) {
+            Log.e(ClipboardReceiver.TAG, "saveToMediaStore error: " + e.getMessage());
             if (uri != null) getContentResolver().delete(uri, null, null);
             return null;
         }
