@@ -35,8 +35,6 @@ public class ClipboardActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 立刻移到背景，不顯示任何 UI
-        moveTaskToBack(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             HiddenApiBypass.addHiddenApiExemptions("");
         }
@@ -103,7 +101,7 @@ public class ClipboardActivity extends Activity {
                 }
             }
 
-            if (success) toast("✓ 圖片已就緒，按 Ctrl+V 或長按貼上");
+            if (success) Log.d(ClipboardReceiver.TAG, "✓ Clipboard set successfully");
 
         } catch (Exception e) {
             Log.e(ClipboardReceiver.TAG, "Error: " + e.getMessage());
