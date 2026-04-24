@@ -6,6 +6,10 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 讀取 /sdcard/cb_b64.txt（大圖繞過 Binder 限制用）-->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:label="ClipboardBridge"
@@ -22,8 +26,14 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ClipboardActivity"
+            android:exported="true"
+            android:theme="@style/Theme.AppCompat.Light.NoActionBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
+
         <receiver
-            android:name=".ClipboardReceiver"
             android:exported="true"
             android:enabled="true">
             <intent-filter>

@@ -17,8 +17,10 @@ import android.widget.Toast;
 
 import org.lsposed.hiddenapibypass.HiddenApiBypass;
 
+import java.io.File;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.util.List;
 
 import rikka.shizuku.Shizuku;
@@ -28,6 +30,7 @@ import rikka.shizuku.SystemServiceHelper;
 public class ClipboardActivity extends Activity {
 
     static final String EXTRA_IMAGE_DATA = "image_data";
+    static final String CB_FILE_PATH = "/sdcard/cb_b64.txt";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -38,8 +41,42 @@ public class ClipboardActivity extends Activity {
             HiddenApiBypass.addHiddenApiExemptions("");
         }
 
+        // 優先從 Intent 讀，沒有就從檔案讀（繞過 Binder 1MB 限制）
         String b64 = getIntent().getStringExtra(EXTRA_IMAGE_DATA);
-        if (b64 == null || b64.isEmpty()) { finish(); return; }
+
+        if (b64 == null || b64.isEmpty()) {
+            Log.d(ClipboardReceiver.TAG, "image_data empty in Intent, trying file: " + CB_FILE_PATH);
+            try {
+                File file = new File(CB_FILE_PATH);
+                if (file.exists()) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        byte[] bytes = Files.readAllBytes(file.toPath());
+                        b64 = new String(bytes, "UTF-8").trim();
+                    } else {
+                        // API < 26 fallback
+                        java.io.BufferedReader reader = new java.io.BufferedReader(
+                            new java.io.FileReader(file));
+                        StringBuilder sb = new StringBuilder();
+                        String line;
+                        while ((line = reader.readLine()) != null) sb.append(line);
+                        reader.close();
+                        b64 = sb.toString().trim();
+                    }
+                    file.delete();
+                    Log.d(ClipboardReceiver.TAG, "Read from file, length=" + b64.length());
+                } else {
+                    Log.e(ClipboardReceiver.TAG, "File not found: " + CB_FILE_PATH);
+                }
+            } catch (Exception e) {
+                Log.e(ClipboardReceiver.TAG, "File read error: " + e.getMessage());
+            }
+        }
+
+        if (b64 == null || b64.isEmpty()) {
+            Log.e(ClipboardReceiver.TAG, "No image data from Intent or file");
+            finish();
+            return;
+        }
 
         try {
             byte[] bytes = Base64.decode(b64, Base64.NO_WRAP);
@@ -62,7 +99,7 @@ public class ClipboardActivity extends Activity {
                 if (cm != null) {
                     cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
                     success = true;
-                    Log.d(ClipboardReceiver.TAG, "✓ Set via ClipboardManager");
+                    Log.d(ClipboardReceiver.TAG, "✓ Set via ClipboardManager: " + uri);
                 }
             }
 
@@ -98,16 +135,9 @@ public class ClipboardActivity extends Activity {
             Method asInterface = stubClass.getMethod("asInterface", IBinder.class);
             Object iClipboard = asInterface.invoke(null, binderWrapper);
 
-            // 用 HiddenApiBypass 列出所有方法
             List<Method> methods = (List<Method>) HiddenApiBypass.getDeclaredMethods(iClipboard.getClass());
-            Log.d(ClipboardReceiver.TAG, "=== Methods via HiddenApiBypass (" + methods.size() + ") ===");
-            for (Method m : methods) {
-                Log.d(ClipboardReceiver.TAG, "  HM: " + m.getName() + " params=" + m.getParameterTypes().length);
-            }
-
             ClipData clip = ClipData.newUri(getContentResolver(), "image", imageUri);
 
-            // 嘗試所有包含 set/clip/primary 的方法
             for (Method m : methods) {
                 String name = m.getName().toLowerCase();
                 if (!name.contains("set")) continue;
@@ -115,7 +145,6 @@ public class ClipboardActivity extends Activity {
 
                 m.setAccessible(true);
                 Class<?>[] params = m.getParameterTypes();
-                Log.d(ClipboardReceiver.TAG, "Trying: " + m.getName() + " params=" + params.length);
 
                 try {
                     switch (params.length) {
@@ -129,11 +158,9 @@ public class ClipboardActivity extends Activity {
                     Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(" + params.length + ")");
                     return true;
                 } catch (Exception e) {
-                    Log.w(ClipboardReceiver.TAG, m.getName() + "(" + params.length + ") failed: " + e.getMessage());
+                    Log.w(ClipboardReceiver.TAG, m.getName() + " failed: " + e.getMessage());
                 }
             }
-
-            Log.e(ClipboardReceiver.TAG, "No suitable method found");
             return false;
 
         } catch (Exception e) {
