@@ -100,6 +100,8 @@ class ImageServer {
             }
 
             boolean ok = setClipboard(uri);
+            // 保留這張（剪貼簿指向它），刪掉之前累積的舊圖
+            MediaStoreUtils.deleteOthers(context, uri);
             if (!ok) {
                 // 背景寫剪貼簿被擋 → 交給前景服務（仍不搶焦點）
                 try {

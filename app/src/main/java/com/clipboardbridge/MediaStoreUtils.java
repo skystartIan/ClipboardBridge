@@ -1,7 +1,9 @@
 package com.clipboardbridge;
 
+import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.provider.MediaStore;
@@ -10,6 +12,36 @@ import android.util.Log;
 import java.io.OutputStream;
 
 class MediaStoreUtils {
+
+    /**
+     * 刪掉 Pictures/ClipboardBridge 底下除了 keepUri 以外的所有圖片，
+     * 避免剪貼簿橋接的暫存圖不斷累積在相簿。keepUri 是目前剪貼簿指向的那張，保留。
+     */
+    static void deleteOthers(Context context, Uri keepUri) {
+        long keepId = -1;
+        try { keepId = ContentUris.parseId(keepUri); } catch (Exception ignore) {}
+        String sel = MediaStore.Images.Media.RELATIVE_PATH + " LIKE ?";
+        String[] args = {"Pictures/ClipboardBridge%"};
+        int deleted = 0;
+        try (Cursor c = context.getContentResolver().query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                new String[]{MediaStore.Images.Media._ID}, sel, args, null)) {
+            if (c != null) {
+                int idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID);
+                while (c.moveToNext()) {
+                    long id = c.getLong(idCol);
+                    if (id == keepId) continue;
+                    Uri u = ContentUris.withAppendedId(
+                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id);
+                    try { deleted += context.getContentResolver().delete(u, null, null); }
+                    catch (Exception ignore) {}
+                }
+            }
+        } catch (Exception e) {
+            Log.w(ClipboardReceiver.TAG, "deleteOthers failed: " + e.getMessage());
+        }
+        if (deleted > 0) Log.d(ClipboardReceiver.TAG, "cleaned " + deleted + " old clip images");
+    }
 
     static Uri saveBitmap(Context context, Bitmap bitmap) {
         ContentValues values = new ContentValues();
