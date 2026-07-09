@@ -2,7 +2,6 @@ package com.clipboardbridge.agent;
 
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.ContentResolver;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.net.Uri;
@@ -46,16 +45,18 @@ public final class ClipAgent {
             }
             fixContextField(cm, ctx);
 
-            final ContentResolver cr = ctx.getContentResolver();
-
-            cm.addPrimaryClipChangedListener(() -> {
-                try {
-                    report(cm);
-                } catch (Throwable t) {
-                    System.out.println("CLIPERR:" + t);
-                    System.out.flush();
-                }
-            });
+            cm.addPrimaryClipChangedListener(
+                new ClipboardManager.OnPrimaryClipChangedListener() {
+                    @Override
+                    public void onPrimaryClipChanged() {
+                        try {
+                            report(cm);
+                        } catch (Throwable t) {
+                            System.out.println("CLIPERR:" + t);
+                            System.out.flush();
+                        }
+                    }
+                });
 
             System.out.println("CLIPRDY:listening");
             System.out.flush();
