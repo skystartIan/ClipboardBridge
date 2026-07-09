@@ -7,19 +7,14 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
-import android.util.Base64;
 import android.util.Log;
 
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 
@@ -45,6 +40,8 @@ public class NotificationService extends NotificationListenerService {
         }
     };
 
+    private ImageServer imageServer;
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -54,6 +51,9 @@ public class NotificationService extends NotificationListenerService {
         } else {
             registerReceiver(ipReceiver, filter);
         }
+        // 圖片剪貼簿 TCP 直送伺服器（跟著這個常駐 listener 的生命週期）
+        imageServer = new ImageServer(this);
+        imageServer.start();
         Log.d(TAG, "NotificationService started, waiting for PC IP...");
     }
 
@@ -61,6 +61,7 @@ public class NotificationService extends NotificationListenerService {
     public void onDestroy() {
         super.onDestroy();
         try { unregisterReceiver(ipReceiver); } catch (Exception e) { }
+        try { if (imageServer != null) imageServer.stop(); } catch (Exception e) { }
     }
 
     @Override
@@ -101,26 +102,11 @@ public class NotificationService extends NotificationListenerService {
                 appName = pm.getApplicationLabel(ai).toString();
             } catch (Exception e) { }
 
-            String iconB64 = "";
-            try {
-                PackageManager pm = getPackageManager();
-                Drawable icon = pm.getApplicationIcon(pkg);
-                Bitmap bmp = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888);
-                Canvas canvas = new Canvas(bmp);
-                icon.setBounds(0, 0, 96, 96);
-                icon.draw(canvas);
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                bmp.compress(Bitmap.CompressFormat.PNG, 80, baos);
-                iconB64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
-                bmp.recycle();
-            } catch (Exception e) { }
-
             JSONObject json = new JSONObject();
             json.put("pkg", pkg);
             json.put("app", appName);
             json.put("title", title);
             json.put("text", text);
-            json.put("icon", iconB64);
             json.put("time", System.currentTimeMillis());
 
             // 去重複：同一則通知 2 秒內只傳一次
@@ -154,7 +140,6 @@ public class NotificationService extends NotificationListenerService {
                 socket.close();
             } catch (Exception e) {
                 Log.w(TAG, "sendToPC(" + host + ") failed: " + e.getMessage());
-                pcHost = null;
             }
         }).start();
     }

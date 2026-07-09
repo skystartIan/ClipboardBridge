@@ -6,7 +6,6 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
@@ -16,7 +15,6 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
 import android.widget.Toast;
@@ -24,12 +22,11 @@ import android.widget.Toast;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
-import java.io.OutputStream;
-
 public class ClipboardService extends Service {
 
     private static final String CHANNEL_ID = "cb_bridge";
     private static final int NOTIF_ID = 1001;
+    static final String EXTRA_IMAGE_URI = "image_uri";
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -40,10 +37,33 @@ public class ClipboardService extends Service {
             if (b64 != null && !b64.isEmpty()) {
                 handleBase64(this, b64);
             }
+            // ImageServer 背景寫剪貼簿被擋時的 fallback：圖已在 MediaStore，
+            // 由本前景服務把 URI 設進剪貼簿
+            String uriStr = intent.getStringExtra(EXTRA_IMAGE_URI);
+            if (uriStr != null && !uriStr.isEmpty()) {
+                setClipFromUri(this, android.net.Uri.parse(uriStr));
+            }
         }
 
         stopSelf();
         return START_NOT_STICKY;
+    }
+
+    private static void setClipFromUri(Context context, Uri uri) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                ClipboardManager cm = (ClipboardManager)
+                        context.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newUri(
+                            context.getContentResolver(), "image", uri));
+                    Log.d(ClipboardReceiver.TAG, "✓ Clip set from uri (fg svc): " + uri);
+                    showToast(context, "✓ 圖片已就緒，可貼上");
+                }
+            } catch (Exception e) {
+                Log.e(ClipboardReceiver.TAG, "setClipFromUri failed: " + e.getMessage());
+            }
+        });
     }
 
     // 靜態方法，讓 BroadcastReceiver 在 Service 啟動失敗時也能呼叫
@@ -91,29 +111,7 @@ public class ClipboardService extends Service {
     }
 
     private static Uri saveToMediaStore(Context context, Bitmap bitmap) {
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Images.Media.DISPLAY_NAME, "cb_" + System.currentTimeMillis() + ".png");
-        values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-        values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/ClipboardBridge");
-        values.put(MediaStore.Images.Media.IS_PENDING, 1);
-
-        Uri uri = null;
-        try {
-            uri = context.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) return null;
-            try (OutputStream out = context.getContentResolver().openOutputStream(uri)) {
-                if (out == null) return null;
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-            }
-            values.clear();
-            values.put(MediaStore.Images.Media.IS_PENDING, 0);
-            context.getContentResolver().update(uri, values, null, null);
-            return uri;
-        } catch (Exception e) {
-            Log.e(ClipboardReceiver.TAG, "saveToMediaStore failed: " + e.getMessage());
-            if (uri != null) context.getContentResolver().delete(uri, null, null);
-            return null;
-        }
+        return MediaStoreUtils.saveBitmap(context, bitmap);
     }
 
     private static void showToast(Context context, String msg) {

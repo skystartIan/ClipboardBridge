@@ -3,14 +3,11 @@ package com.clipboardbridge;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.ContentValues;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.IBinder;
-import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
 import android.widget.Toast;
@@ -18,14 +15,7 @@ import android.widget.Toast;
 import org.lsposed.hiddenapibypass.HiddenApiBypass;
 
 import java.io.File;
-import java.io.OutputStream;
-import java.lang.reflect.Method;
 import java.nio.file.Files;
-import java.util.List;
-
-import rikka.shizuku.Shizuku;
-import rikka.shizuku.ShizukuBinderWrapper;
-import rikka.shizuku.SystemServiceHelper;
 
 public class ClipboardActivity extends Activity {
 
@@ -52,12 +42,12 @@ public class ClipboardActivity extends Activity {
                         b64 = new String(bytes, "UTF-8").trim();
                     } else {
                         // API < 26 fallback
-                        java.io.BufferedReader reader = new java.io.BufferedReader(
-                            new java.io.FileReader(file));
                         StringBuilder sb = new StringBuilder();
-                        String line;
-                        while ((line = reader.readLine()) != null) sb.append(line);
-                        reader.close();
+                        try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                                new java.io.FileReader(file))) {
+                            String line;
+                            while ((line = reader.readLine()) != null) sb.append(line);
+                        }
                         b64 = sb.toString().trim();
                     }
                     file.delete();
@@ -115,90 +105,8 @@ public class ClipboardActivity extends Activity {
         finish();
     }
 
-    private boolean isShizukuAvailable() {
-        try {
-            return Shizuku.pingBinder() &&
-                   Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private boolean setClipboardViaShizuku(Uri imageUri) {
-        try {
-            IBinder originalBinder = SystemServiceHelper.getSystemService("clipboard");
-            if (originalBinder == null) {
-                Log.e(ClipboardReceiver.TAG, "Cannot get clipboard binder");
-                return false;
-            }
-
-            ShizukuBinderWrapper binderWrapper = new ShizukuBinderWrapper(originalBinder);
-            Class<?> stubClass = Class.forName("android.content.IClipboard$Stub");
-            Method asInterface = stubClass.getMethod("asInterface", IBinder.class);
-            Object iClipboard = asInterface.invoke(null, binderWrapper);
-
-            List<Method> methods = (List<Method>) HiddenApiBypass.getDeclaredMethods(iClipboard.getClass());
-            ClipData clip = ClipData.newUri(getContentResolver(), "image", imageUri);
-
-            for (Method m : methods) {
-                String name = m.getName().toLowerCase();
-                if (!name.contains("set")) continue;
-                if (!name.contains("clip") && !name.contains("primary")) continue;
-
-                m.setAccessible(true);
-                Class<?>[] params = m.getParameterTypes();
-
-                try {
-                    switch (params.length) {
-                        case 1: m.invoke(iClipboard, clip); break;
-                        case 2: m.invoke(iClipboard, clip, "com.android.shell"); break;
-                        case 3: m.invoke(iClipboard, clip, "com.android.shell", 0); break;
-                        case 4: m.invoke(iClipboard, clip, "com.android.shell", 0, "com.android.shell"); break;
-                        case 5: m.invoke(iClipboard, clip, "com.android.shell", "com.android.shell", 0, "com.android.shell"); break;
-                        default: continue;
-                    }
-                    Log.d(ClipboardReceiver.TAG, "✓ " + m.getName() + "(" + params.length + ")");
-                    return true;
-                } catch (Exception e) {
-                    Log.w(ClipboardReceiver.TAG, m.getName() + " failed: " + e.getMessage());
-                }
-            }
-            return false;
-
-        } catch (Exception e) {
-            Log.e(ClipboardReceiver.TAG, "Shizuku failed: " + e.getMessage());
-            return false;
-        }
-    }
-
     private Uri saveToMediaStore(Bitmap bitmap) {
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Images.Media.DISPLAY_NAME, "cb_" + System.currentTimeMillis() + ".png");
-        values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-        values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/ClipboardBridge");
-        values.put(MediaStore.Images.Media.IS_PENDING, 1);
-
-        Uri uri = null;
-        try {
-            Log.d(ClipboardReceiver.TAG, "saveToMediaStore: inserting...");
-            uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            Log.d(ClipboardReceiver.TAG, "saveToMediaStore: uri=" + uri);
-            if (uri == null) { Log.e(ClipboardReceiver.TAG, "saveToMediaStore: insert returned null"); return null; }
-            try (OutputStream out = getContentResolver().openOutputStream(uri)) {
-                if (out == null) { Log.e(ClipboardReceiver.TAG, "saveToMediaStore: openOutputStream null"); return null; }
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-                Log.d(ClipboardReceiver.TAG, "saveToMediaStore: compress done");
-            }
-            values.clear();
-            values.put(MediaStore.Images.Media.IS_PENDING, 0);
-            getContentResolver().update(uri, values, null, null);
-            Log.d(ClipboardReceiver.TAG, "saveToMediaStore: success, uri=" + uri);
-            return uri;
-        } catch (Exception e) {
-            Log.e(ClipboardReceiver.TAG, "saveToMediaStore error: " + e.getMessage());
-            if (uri != null) getContentResolver().delete(uri, null, null);
-            return null;
-        }
+        return MediaStoreUtils.saveBitmap(this, bitmap);
     }
 
     private void toast(String msg) {
