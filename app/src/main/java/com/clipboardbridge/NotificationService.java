@@ -42,6 +42,18 @@ public class NotificationService extends NotificationListenerService {
 
     private ImageServer imageServer;
 
+    // 平板獨立自啟：定期用 Shizuku 確保 clip agent 活著（取代 MacroDroid）
+    private static final long AGENT_CHECK_MS = 60_000;
+    private final android.os.Handler agentHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable agentTick = new Runnable() {
+        @Override
+        public void run() {
+            try { AgentStarter.ensureAgent(NotificationService.this); } catch (Throwable ignore) {}
+            agentHandler.postDelayed(this, AGENT_CHECK_MS);
+        }
+    };
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -54,6 +66,8 @@ public class NotificationService extends NotificationListenerService {
         // 圖片剪貼簿 TCP 直送伺服器（跟著這個常駐 listener 的生命週期）
         imageServer = new ImageServer(this);
         imageServer.start();
+        // 開機後 Shizuku 可能還沒起來 → 先試一次，再每 60s 重試（冪等，去重靠看門狗）
+        agentHandler.post(agentTick);
         Log.d(TAG, "NotificationService started, waiting for PC IP...");
     }
 
@@ -62,6 +76,7 @@ public class NotificationService extends NotificationListenerService {
         super.onDestroy();
         try { unregisterReceiver(ipReceiver); } catch (Exception e) { }
         try { if (imageServer != null) imageServer.stop(); } catch (Exception e) { }
+        try { agentHandler.removeCallbacks(agentTick); } catch (Exception e) { }
     }
 
     @Override

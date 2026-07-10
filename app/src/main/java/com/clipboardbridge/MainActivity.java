@@ -22,7 +22,8 @@ public class MainActivity extends Activity {
         (requestCode, grantResult) -> {
             if (requestCode == SHIZUKU_REQUEST_CODE) {
                 if (grantResult == PackageManager.PERMISSION_GRANTED) {
-                    Toast.makeText(this, "✓ Shizuku 已授權", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(this, "✓ Shizuku 已授權，啟動 Agent", Toast.LENGTH_SHORT).show();
+                    AgentStarter.ensureAgent(this);
                 } else {
                     Toast.makeText(this, "✗ Shizuku 授權被拒絕", Toast.LENGTH_SHORT).show();
                 }
@@ -102,6 +103,28 @@ public class MainActivity extends Activity {
         });
         layout.addView(overlayBtn);
 
+        // 啟動 Agent 按鈕（平板獨立自啟：用 Shizuku 起 clip agent，不需 MacroDroid）
+        Button agentBtn = new Button(this);
+        agentBtn.setText("Start Clipboard Agent");
+        agentBtn.setBackgroundColor(0xFF27AE60);
+        agentBtn.setTextColor(0xFFFFFFFF);
+        LinearLayout.LayoutParams p2 = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT);
+        p2.setMargins(0, 16, 0, 0);
+        agentBtn.setLayoutParams(p2);
+        agentBtn.setOnClickListener(v -> {
+            if (!isShizukuGranted()) {
+                Toast.makeText(this, "請先授權 Shizuku", Toast.LENGTH_LONG).show();
+                return;
+            }
+            AgentStarter.ensureAgent(this);
+            Toast.makeText(this, "已請求啟動 Agent（peer "
+                + AgentStarter.DEFAULT_REMOTE + ":" + AgentStarter.DEFAULT_PORT + "）",
+                Toast.LENGTH_SHORT).show();
+        });
+        layout.addView(agentBtn);
+
         // 狀態顯示
         TextView status = new TextView(this);
         boolean shizukuOk = isShizukuGranted();
@@ -116,6 +139,11 @@ public class MainActivity extends Activity {
         layout.addView(status);
 
         setContentView(layout);
+
+        // 已授權就順手確保 agent 在跑（冪等）
+        if (isShizukuGranted()) {
+            AgentStarter.ensureAgent(this);
+        }
     }
 
     private boolean isShizukuGranted() {

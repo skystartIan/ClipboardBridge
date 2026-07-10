@@ -28,6 +28,14 @@ jobs:
         with:
           gradle-version: '8.4'
 
+      # 固定 debug 簽章：第一次 build 產生 debug.keystore 後快取，之後每次復用
+      # → 簽章不再每次變，adb install -r 即可，通知/ Shizuku 授權不會掉
+      - name: Cache debug keystore (stable signature)
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: clipboardbridge-debug-keystore-v1
+
       - name: Build Release APK
         run: gradle assembleRelease
         working-directory: .
