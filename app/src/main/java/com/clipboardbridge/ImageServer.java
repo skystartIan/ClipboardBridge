@@ -37,7 +37,8 @@ class ImageServer {
     private static final int MAX_BYTES = 20 * 1024 * 1024;
 
     private final Context context;
-    private ServerSocket server;
+    private volatile ServerSocket server;
+    private volatile boolean running;
     private Thread thread;
 
     ImageServer(Context context) {
@@ -46,16 +47,30 @@ class ImageServer {
 
     void start() {
         if (thread != null) return;
+        running = true;
         thread = new Thread(() -> {
-            try {
-                server = new ServerSocket(PORT);
-                Log.d(TAG, "ImageServer listening :" + PORT);
-                while (true) {
-                    Socket s = server.accept();
-                    new Thread(() -> handle(s)).start();
+            // 外層迴圈：ServerSocket 或 accept 掛掉時重綁，不會一次例外就永久死掉
+            while (running) {
+                ServerSocket srv = null;
+                try {
+                    srv = new ServerSocket(PORT);
+                    server = srv;
+                    Log.d(TAG, "ImageServer listening :" + PORT);
+                    while (running) {
+                        final Socket s = srv.accept();
+                        new Thread(() -> {
+                            try { handle(s); }
+                            catch (Throwable t) { Log.w(TAG, "handle err: " + t); }
+                        }).start();
+                    }
+                } catch (Exception e) {
+                    if (running) Log.w(TAG, "ImageServer loop err, rebinding: " + e);
+                } finally {
+                    try { if (srv != null) srv.close(); } catch (Exception ignore) {}
                 }
-            } catch (Exception e) {
-                Log.w(TAG, "ImageServer stopped: " + e.getMessage());
+                if (running) {
+                    try { Thread.sleep(1000); } catch (InterruptedException ignore) {}
+                }
             }
         });
         thread.setDaemon(true);
@@ -63,6 +78,7 @@ class ImageServer {
     }
 
     void stop() {
+        running = false;
         try {
             if (server != null) server.close();
         } catch (Exception ignored) { }

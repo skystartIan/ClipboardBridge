@@ -203,25 +203,28 @@ public final class ClipAgent {
         System.out.flush();
     }
 
-    /** 把圖片 bytes 送到 app 的 ImageServer（同機 127.0.0.1:9998）。 */
+    /** 把圖片 bytes 送到 app 的 ImageServer（同機 127.0.0.1:9998），失敗重試。 */
     private static boolean forwardToImageServer(byte[] imgBytes) {
-        Socket s = null;
-        try {
-            s = new Socket();
-            s.connect(new java.net.InetSocketAddress("127.0.0.1", 9998), 3000);
-            s.setSoTimeout(15000);
-            DataOutputStream out = new DataOutputStream(s.getOutputStream());
-            out.writeInt(imgBytes.length);      // ImageServer 協議：[4B len][bytes]
-            out.write(imgBytes);
-            out.flush();
-            int ack = s.getInputStream().read();
-            return ack == 1;
-        } catch (Exception e) {
-            System.out.println("CLIPERR:imgserver " + e);
-            return false;
-        } finally {
-            if (s != null) try { s.close(); } catch (Exception ignore) {}
+        for (int attempt = 0; attempt < 4; attempt++) {
+            Socket s = null;
+            try {
+                s = new Socket();
+                s.connect(new java.net.InetSocketAddress("127.0.0.1", 9998), 1500);
+                s.setSoTimeout(20000);
+                DataOutputStream out = new DataOutputStream(s.getOutputStream());
+                out.writeInt(imgBytes.length);   // ImageServer 協議：[4B len][bytes]
+                out.write(imgBytes);
+                out.flush();
+                int ack = s.getInputStream().read();
+                if (ack == 1) return true;
+            } catch (Exception e) {
+                if (attempt == 3) System.out.println("CLIPERR:imgserver " + e);
+            } finally {
+                if (s != null) try { s.close(); } catch (Exception ignore) {}
+            }
+            try { Thread.sleep(600); } catch (InterruptedException ignore) {}
         }
+        return false;
     }
 
     // ── 網路：client 負責送（在 OUT_SOCKS，斷線自動重連）；server 只收 ─
