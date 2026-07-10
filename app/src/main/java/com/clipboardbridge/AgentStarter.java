@@ -81,9 +81,11 @@ final class AgentStarter {
      */
     private static String buildCommand(String remote, int port) {
         // 內層迴圈（會被 setsid 成獨立 session，argv 尾帶 clipagent_watch 供 /proc 硬偵測）
+        // 注意：看門狗自己的 cmdline 也含 "ClipAgent"（launch 指令內嵌其中），
+        // 故用 grep -v clipagent_watch 把「看門狗自己那行」排掉，只看有沒有「真 agent」。
         String inner =
                 "while true; do "
-              + "if ! ps -A -o ARGS 2>/dev/null | grep -q \"[C]lipAgent\"; then "
+              + "if ! ps -A -o ARGS 2>/dev/null | grep \"[C]lipAgent\" | grep -qv clipagent_watch; then "
               + "CLASSPATH=" + DEX + " app_process / " + AGENT_CLASS + " " + remote + " " + port
               + " >/dev/null 2>&1 & "
               + "fi; sleep " + WATCH_INTERVAL + "; done";
