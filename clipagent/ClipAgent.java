@@ -121,21 +121,34 @@ public final class ClipAgent {
         }
     }
 
-    // ── 角色 2a：平板剪貼簿圖片 → 送遠端 ─────────────────────────────
+    // ── 角色 2a：平板剪貼簿（圖片/文字）→ 送遠端 ────────────────────
     private static void relayClipToRemote(ClipboardManager cm) {
         if (System.currentTimeMillis() < suppressClipSendUntil) return;
         ClipData clip = cm.getPrimaryClip();
         if (clip == null || clip.getItemCount() == 0) return;
-        Uri uri = clip.getItemAt(0).getUri();
-        if (uri == null) return;                 // 純文字走 RDP，不 relay
-        byte[] bytes = execContentRead(uri);
-        if (bytes == null || bytes.length < 64) return;
-        String h = md5(bytes);
-        if (h.equals(lastRelayHash)) return;     // 剛送/剛收過，別重送
-        lastRelayHash = h;
-        broadcast(bytes);
-        System.out.println("PEERSENT:" + bytes.length);
-        System.out.flush();
+        ClipData.Item item = clip.getItemAt(0);
+        Uri uri = item.getUri();
+        if (uri != null) {
+            byte[] bytes = execContentRead(uri);
+            if (bytes == null || bytes.length < 64) return;
+            String h = md5(bytes);
+            if (h.equals(lastRelayHash)) return;   // 剛送/剛收過，別重送
+            lastRelayHash = h;
+            broadcast('I', bytes);
+            System.out.println("PEERSENT:img " + bytes.length);
+            System.out.flush();
+            return;
+        }
+        CharSequence text = item.getText();
+        if (text != null && text.length() > 0) {
+            byte[] bytes = text.toString().getBytes(StandardCharsets.UTF_8);
+            String h = md5(bytes);
+            if (h.equals(lastRelayHash)) return;
+            lastRelayHash = h;
+            broadcast('T', bytes);
+            System.out.println("PEERSENT:txt " + bytes.length);
+            System.out.flush();
+        }
     }
 
     /** exec `content read --uri <uri>` 取圖片 bytes（shell uid 有權限）。 */
@@ -156,7 +169,7 @@ public final class ClipAgent {
         }
     }
 
-    // ── 角色 2b：收遠端圖片 → 印給公司電腦 ───────────────────────────
+    // ── 角色 2b：收遠端圖片/文字 → 印給公司電腦 ─────────────────────
     private static void onRemoteImage(byte[] payload) {
         String h = md5(payload);
         if (h.equals(lastRelayHash)) return;     // echo（我們剛送出去的）
@@ -169,7 +182,20 @@ public final class ClipAgent {
         System.out.flush();
     }
 
-    // ── 網路：server（收）+ client（送）──────────────────────────────
+    private static void onRemoteText(byte[] payload) {
+        String h = md5(payload);
+        if (h.equals(lastRelayHash)) return;
+        lastRelayHash = h;
+        suppressClipSendUntil = System.currentTimeMillis() + 6000;
+        String b64 = android.util.Base64.encodeToString(payload,
+                android.util.Base64.NO_WRAP);
+        System.out.println("PEERTEXT:" + b64);
+        System.out.flush();
+    }
+
+    // ── 網路：client 負責送（在 OUT_SOCKS，斷線自動重連）；server 只收 ─
+    // 對方（clip_peer.py）也是 client 送 / server 收，所以我方送資料要走
+    // 「我方 client → 對方 server」這條；被連進來的 server 連線只用來收。
     private static void startServer() {
         Thread t = new Thread(new Runnable() {
             public void run() {
@@ -193,6 +219,35 @@ public final class ClipAgent {
         t.start();
     }
 
+    private static void startClient() {
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                while (true) {
+                    Socket s = null;
+                    try {
+                        s = new Socket();
+                        s.connect(new java.net.InetSocketAddress(remoteIp, port), 5000);
+                        s.setTcpNoDelay(true);
+                        synchronized (OUT_SOCKS) { OUT_SOCKS.add(s); }
+                        System.out.println("CLIPPEER:connected " + remoteIp);
+                        System.out.flush();
+                        recvLoop(s);             // 阻塞直到斷線（對方通常不回送，等 EOF）
+                    } catch (Exception e) {
+                        // 連不上/斷線
+                    } finally {
+                        if (s != null) {
+                            synchronized (OUT_SOCKS) { OUT_SOCKS.remove(s); }
+                            try { s.close(); } catch (Exception ignore) {}
+                        }
+                    }
+                    sleep(3000);                 // 斷線後重連
+                }
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+    }
+
     private static void recvLoop(Socket s) {
         try {
             DataInputStream in = new DataInputStream(s.getInputStream());
@@ -204,7 +259,7 @@ public final class ClipAgent {
                 byte[] payload = new byte[len];
                 in.readFully(payload);
                 if (kind == 'I') onRemoteImage(payload);
-                // 'T' 文字忽略（走 RDP）
+                else if (kind == 'T') onRemoteText(payload);
             }
         } catch (Exception ignore) {
         } finally {
@@ -212,42 +267,15 @@ public final class ClipAgent {
         }
     }
 
-    private static void startClient() {
-        Thread t = new Thread(new Runnable() {
-            public void run() {
-                while (true) {
-                    boolean connected;
-                    synchronized (OUT_SOCKS) { connected = !OUT_SOCKS.isEmpty(); }
-                    if (!connected) {
-                        try {
-                            Socket s = new Socket();
-                            s.connect(new java.net.InetSocketAddress(remoteIp, port), 5000);
-                            s.setTcpNoDelay(true);
-                            synchronized (OUT_SOCKS) { OUT_SOCKS.add(s); }
-                            System.out.println("CLIPPEER:connected " + remoteIp);
-                            System.out.flush();
-                        } catch (Exception e) {
-                            sleep(3000);
-                            continue;
-                        }
-                    }
-                    sleep(1000);
-                }
-            }
-        });
-        t.setDaemon(true);
-        t.start();
-    }
-
-    private static void broadcast(byte[] imgBytes) {
+    private static void broadcast(char kind, byte[] payload) {
         synchronized (OUT_SOCKS) {
             List<Socket> dead = new ArrayList<>();
             for (Socket s : OUT_SOCKS) {
                 try {
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
-                    out.writeByte('I');
-                    out.writeInt(imgBytes.length);
-                    out.write(imgBytes);
+                    out.writeByte((int) kind);
+                    out.writeInt(payload.length);
+                    out.write(payload);
                     out.flush();
                 } catch (Exception e) {
                     dead.add(s);
