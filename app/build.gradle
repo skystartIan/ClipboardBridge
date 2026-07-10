@@ -14,10 +14,20 @@ android {
         versionName "1.0"
     }
 
+    signingConfigs {
+        ci {
+            storeFile file('ci.keystore')
+            storePassword 'clipboard'
+            keyAlias 'cb'
+            keyPassword 'clipboard'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            // 固定 CI keystore（workflow 產生+快取），簽章跨 build 穩定
+            signingConfig signingConfigs.ci
         }
     }
 

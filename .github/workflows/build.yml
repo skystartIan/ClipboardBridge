@@ -28,13 +28,25 @@ jobs:
         with:
           gradle-version: '8.4'
 
-      # 固定 debug 簽章：第一次 build 產生 debug.keystore 後快取，之後每次復用
-      # → 簽章不再每次變，adb install -r 即可，通知/ Shizuku 授權不會掉
-      - name: Cache debug keystore (stable signature)
+      # 固定簽章：自產一把 CI keystore 到受控路徑並快取，之後每次 build 復用同一把
+      # → 簽章不再每次變，adb install -r 即可，通知 / Shizuku 授權不會掉
+      - name: Cache CI keystore (stable signature)
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: clipboardbridge-debug-keystore-v1
+          path: app/ci.keystore
+          key: clipboardbridge-ci-keystore-v1
+
+      - name: Ensure CI keystore exists
+        run: |
+          if [ ! -f app/ci.keystore ]; then
+            keytool -genkeypair -v -keystore app/ci.keystore -alias cb \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass clipboard -keypass clipboard \
+              -dname "CN=ClipboardBridge, OU=CI, O=CB, L=X, ST=X, C=US"
+            echo "generated new ci.keystore"
+          else
+            echo "reused cached ci.keystore"
+          fi
 
       - name: Build Release APK
         run: gradle assembleRelease
