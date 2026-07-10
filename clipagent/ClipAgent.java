@@ -169,28 +169,59 @@ public final class ClipAgent {
         }
     }
 
-    // ── 角色 2b：收遠端圖片/文字 → 印給公司電腦 ─────────────────────
+    // ── 角色 2b：收遠端圖片/文字 → 寫進「平板剪貼簿」──────────────────
+    // 寫進平板剪貼簿後：獨立模式可在平板直接貼；三方模式公司電腦也經
+    // 既有路徑（圖片 CLIPURI / 文字 scrcpy device clipboard）拿到。
     private static void onRemoteImage(byte[] payload) {
         String h = md5(payload);
         if (h.equals(lastRelayHash)) return;     // echo（我們剛送出去的）
         lastRelayHash = h;
-        // 抑制：接下來公司電腦會把這張推回平板剪貼簿，別再送回遠端
         suppressClipSendUntil = System.currentTimeMillis() + 6000;
-        String b64 = android.util.Base64.encodeToString(payload,
-                android.util.Base64.NO_WRAP);
-        System.out.println("PEERIMG:" + b64);
+        // 轉給 app 內建 ImageServer（127.0.0.1:9998）存 MediaStore + setPrimaryClip
+        boolean ok = forwardToImageServer(payload);
+        System.out.println("PEERRECV:img " + payload.length + (ok ? " ok" : " FAIL"));
         System.out.flush();
     }
 
-    private static void onRemoteText(byte[] payload) {
+    private static void onRemoteText(final byte[] payload) {
         String h = md5(payload);
         if (h.equals(lastRelayHash)) return;
         lastRelayHash = h;
         suppressClipSendUntil = System.currentTimeMillis() + 6000;
-        String b64 = android.util.Base64.encodeToString(payload,
-                android.util.Base64.NO_WRAP);
-        System.out.println("PEERTEXT:" + b64);
+        final String text = new String(payload, StandardCharsets.UTF_8);
+        // setPrimaryClip 需在主執行緒
+        new android.os.Handler(Looper.getMainLooper()).post(new Runnable() {
+            public void run() {
+                try {
+                    CM.setPrimaryClip(ClipData.newPlainText(null, text));
+                } catch (Throwable t) {
+                    System.out.println("CLIPERR:setText " + t);
+                }
+            }
+        });
+        System.out.println("PEERRECV:txt " + payload.length);
         System.out.flush();
+    }
+
+    /** 把圖片 bytes 送到 app 的 ImageServer（同機 127.0.0.1:9998）。 */
+    private static boolean forwardToImageServer(byte[] imgBytes) {
+        Socket s = null;
+        try {
+            s = new Socket();
+            s.connect(new java.net.InetSocketAddress("127.0.0.1", 9998), 3000);
+            s.setSoTimeout(15000);
+            DataOutputStream out = new DataOutputStream(s.getOutputStream());
+            out.writeInt(imgBytes.length);      // ImageServer 協議：[4B len][bytes]
+            out.write(imgBytes);
+            out.flush();
+            int ack = s.getInputStream().read();
+            return ack == 1;
+        } catch (Exception e) {
+            System.out.println("CLIPERR:imgserver " + e);
+            return false;
+        } finally {
+            if (s != null) try { s.close(); } catch (Exception ignore) {}
+        }
     }
 
     // ── 網路：client 負責送（在 OUT_SOCKS，斷線自動重連）；server 只收 ─
