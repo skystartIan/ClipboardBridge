@@ -149,11 +149,12 @@ class DropZone {
             if (on) showStrip(edgeGravity);
             if (!added) return;
         }
-        // 加寬到 48dp：PC 會在游標離邊緣 ~80px 時提早放開左鍵，
-        // drop 要落在本投放區內（避開 One UI 邊緣分割畫面熱區）
-        lp.width = dp(on ? 48 : 10);
+        // 拖曳中加寬成 150dp 的明顯落區：PC 會在游標離邊緣 ~200px 時
+        // 提早放開左鍵，drop 必須落在本投放區內（One UI「拖到邊緣開
+        // 分割畫面」的系統熱區會搶走貼邊的 drop，寬度未知、要閃得夠遠）
+        lp.width = dp(on ? 150 : 10);
         view.setBackgroundColor(on ? BG_ACTIVE : BG_FAINT);
-        view.setText(on ? "傳\n到\n電\n腦" : "");
+        view.setText(on ? "傳到電腦" : "");
         update();
     }
 
