@@ -66,6 +66,10 @@ public class NotificationService extends NotificationListenerService {
         // 圖片剪貼簿 TCP 直送伺服器（跟著這個常駐 listener 的生命週期）
         imageServer = new ImageServer(this);
         imageServer.start();
+        // 檔案拖放投放區（overlay；由 PC 透過 ImageServer 控制訊框開關）
+        try { DropZone.init(this); } catch (Throwable t) {
+            Log.w(TAG, "DropZone init failed: " + t);
+        }
         // 開機後 Shizuku 可能還沒起來 → 先試一次，再每 60s 重試（冪等，去重靠看門狗）
         agentHandler.post(agentTick);
         Log.d(TAG, "NotificationService started, waiting for PC IP...");

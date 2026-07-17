@@ -93,7 +93,17 @@ class ImageServer {
             OutputStream out = s.getOutputStream();
 
             int len = in.readInt();
-            if (len <= 0 || len > MAX_BYTES) {
+            if (len == 0) {
+                // 控制訊框：len==0 + 1 byte 指令 → DropZone（檔案拖放投放區）
+                int cmd = in.read();
+                String ip = s.getInetAddress().getHostAddress();
+                Log.d(TAG, "ImageServer: DropZone ctrl " + cmd + " from " + ip);
+                DropZone.get(context).onControl(cmd, ip);
+                out.write(1);
+                out.flush();
+                return;
+            }
+            if (len < 0 || len > MAX_BYTES) {
                 Log.e(TAG, "ImageServer: bad length " + len);
                 out.write(0);
                 return;
