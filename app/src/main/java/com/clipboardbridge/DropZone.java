@@ -70,7 +70,9 @@ class DropZone {
     private int edgeGravity = Gravity.RIGHT;
     private volatile String pcIp;
 
-    private static final int BG_FAINT = 0x33007AFF;    // 細條（微透藍）
+    // 細條待命時「完全透明」：視窗必須可見（DRAG_STARTED 只廣播給可見
+    // 視窗）但使用者不該看到東西——只有拖曳中（ctrl 3）才顯色。
+    private static final int BG_FAINT = 0x00000000;    // 待命（隱形）
     private static final int BG_ACTIVE = 0x99007AFF;   // 拖曳中
     private static final int BG_HOVER = 0xCC007AFF;    // 拖到上面
 
