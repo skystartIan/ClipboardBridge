@@ -149,7 +149,9 @@ class DropZone {
             if (on) showStrip(edgeGravity);
             if (!added) return;
         }
-        lp.width = dp(on ? 32 : 10);
+        // 加寬到 48dp：PC 會在游標離邊緣 ~80px 時提早放開左鍵，
+        // drop 要落在本投放區內（避開 One UI 邊緣分割畫面熱區）
+        lp.width = dp(on ? 48 : 10);
         view.setBackgroundColor(on ? BG_ACTIVE : BG_FAINT);
         view.setText(on ? "傳\n到\n電\n腦" : "");
         update();
@@ -188,6 +190,7 @@ class DropZone {
                 locLogged = false;
                 Log.d(TAG, "DropZone: DRAG_STARTED " + state()
                         + " desc=" + e.getClipDescription());
+                notifyPc(1);   // 告訴 PC：平板拖曳開始（供提早放開左鍵）
                 return true;   // 一律表達興趣（是否收得到 drop 由 touchable 決定）
             case DragEvent.ACTION_DRAG_LOCATION:
                 if (!locLogged) {
@@ -210,6 +213,7 @@ class DropZone {
                 return true;
             case DragEvent.ACTION_DRAG_ENDED:
                 Log.d(TAG, "DropZone: DRAG_ENDED result=" + e.getResult());
+                notifyPc(0);   // 拖曳結束
                 if (view.getVisibility() == View.VISIBLE)
                     view.setBackgroundColor(BG_FAINT);
                 return true;
@@ -387,6 +391,23 @@ class DropZone {
         else msg = "傳到電腦 " + sent + "/" + uris.size()
                 + (skipped > 0 ? "（" + skipped + " 個無法讀取）" : "");
         toast(msg);
+    }
+
+    /** 拖曳開始/結束事件回報 PC（:9996 控制訊框 nlen=-2 + 1B 事件）。 */
+    private void notifyPc(int event) {
+        final String ip = pcIp;
+        if (ip == null || ip.isEmpty()) return;
+        new Thread(() -> {
+            try (Socket sock = new Socket()) {
+                sock.connect(new InetSocketAddress(ip, PC_FILE_PORT), 3000);
+                DataOutputStream out = new DataOutputStream(sock.getOutputStream());
+                out.writeInt(-2);          // 0xFFFFFFFE = 拖曳事件訊框
+                out.write(event);
+                out.flush();
+            } catch (Exception e) {
+                Log.w(TAG, "DropZone notifyPc(" + event + ") failed: " + e);
+            }
+        }).start();
     }
 
     private void toast(String msg) {
