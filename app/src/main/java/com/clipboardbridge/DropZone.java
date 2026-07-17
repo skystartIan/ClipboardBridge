@@ -141,6 +141,7 @@ class DropZone {
         view.setText("");
         view.setVisibility(View.VISIBLE);
         update();
+        Log.d(TAG, "DropZone: showStrip " + state());
     }
 
     private void setHighlight(boolean on) {
@@ -172,20 +173,43 @@ class DropZone {
     }
 
     // ── 拖放事件 ────────────────────────────────────────
+    private boolean locLogged = false;   // 每次拖曳只記一次 LOCATION
+
+    private String state() {
+        return "vis=" + (view != null ? view.getVisibility() : -1)
+                + " touchable=" + (lp != null && (lp.flags
+                & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0)
+                + " w=" + (lp != null ? lp.width : -1);
+    }
+
     private boolean onDrag(View v, DragEvent e) {
         switch (e.getAction()) {
             case DragEvent.ACTION_DRAG_STARTED:
+                locLogged = false;
+                Log.d(TAG, "DropZone: DRAG_STARTED " + state()
+                        + " desc=" + e.getClipDescription());
                 return true;   // 一律表達興趣（是否收得到 drop 由 touchable 決定）
+            case DragEvent.ACTION_DRAG_LOCATION:
+                if (!locLogged) {
+                    locLogged = true;
+                    Log.d(TAG, "DropZone: DRAG_LOCATION 首次進入 ("
+                            + e.getX() + "," + e.getY() + ")");
+                }
+                return true;
             case DragEvent.ACTION_DRAG_ENTERED:
+                Log.d(TAG, "DropZone: DRAG_ENTERED");
                 view.setBackgroundColor(BG_HOVER);
                 return true;
             case DragEvent.ACTION_DRAG_EXITED:
+                Log.d(TAG, "DropZone: DRAG_EXITED");
                 view.setBackgroundColor(BG_ACTIVE);
                 return true;
             case DragEvent.ACTION_DROP:
+                Log.d(TAG, "DropZone: DROP " + state());
                 handleDrop(e);
                 return true;
             case DragEvent.ACTION_DRAG_ENDED:
+                Log.d(TAG, "DropZone: DRAG_ENDED result=" + e.getResult());
                 if (view.getVisibility() == View.VISIBLE)
                     view.setBackgroundColor(BG_FAINT);
                 return true;
