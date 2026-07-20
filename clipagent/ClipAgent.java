@@ -133,10 +133,7 @@ public final class ClipAgent {
             if (bytes == null || bytes.length < 64) return;
             String h = md5(bytes);
             if (h.equals(lastRelayHash)) return;   // 剛送/剛收過，別重送
-            lastRelayHash = h;
-            broadcast('I', bytes);
-            System.out.println("PEERSENT:img " + bytes.length);
-            System.out.flush();
+            report("img", bytes.length, broadcast('I', bytes), h);
             return;
         }
         CharSequence text = item.getText();
@@ -144,11 +141,26 @@ public final class ClipAgent {
             byte[] bytes = text.toString().getBytes(StandardCharsets.UTF_8);
             String h = md5(bytes);
             if (h.equals(lastRelayHash)) return;
-            lastRelayHash = h;
-            broadcast('T', bytes);
-            System.out.println("PEERSENT:txt " + bytes.length);
-            System.out.flush();
+            report("txt", bytes.length, broadcast('T', bytes), h);
         }
+    }
+
+    /**
+     * 回報一次轉發結果，並只在真的送出去時才記 hash。
+     *
+     * 以前不管有沒有 peer 連著都印 PEERSENT，而 broadcast 對空的 OUT_SOCKS 是
+     * no-op → log 看起來一切正常、東西其實丟進黑洞（遠端 clip_peer 沒跑時就是
+     * 這樣，害人往截圖/剪貼簿的方向白查）。沒送出去就不記 hash，之後 peer 連
+     * 上再複製一次同樣的內容才不會被去重擋掉。
+     */
+    private static void report(String kind, int size, int peers, String hash) {
+        if (peers > 0) {
+            lastRelayHash = hash;
+            System.out.println("PEERSENT:" + kind + " " + size + " -> " + peers + " peer");
+        } else {
+            System.out.println("PEERNONE:" + kind + " " + size + " 沒有連上的 peer，這包沒送出去");
+        }
+        System.out.flush();
     }
 
     /** exec `content read --uri <uri>` 取圖片 bytes（shell uid 有權限）。 */
@@ -301,7 +313,9 @@ public final class ClipAgent {
         }
     }
 
-    private static void broadcast(char kind, byte[] payload) {
+    /** 回傳真正寫出去的 peer 數。0 ＝ 沒人連著，這包等於丟掉。 */
+    private static int broadcast(char kind, byte[] payload) {
+        int sent = 0;
         synchronized (OUT_SOCKS) {
             List<Socket> dead = new ArrayList<>();
             for (Socket s : OUT_SOCKS) {
@@ -311,6 +325,7 @@ public final class ClipAgent {
                     out.writeInt(payload.length);
                     out.write(payload);
                     out.flush();
+                    sent++;
                 } catch (Exception e) {
                     dead.add(s);
                 }
@@ -320,6 +335,7 @@ public final class ClipAgent {
                 OUT_SOCKS.remove(s);
             }
         }
+        return sent;
     }
 
     // ── 工具 ────────────────────────────────────────────────────────

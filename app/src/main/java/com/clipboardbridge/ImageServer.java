@@ -41,6 +41,19 @@ class ImageServer {
     /** 6 = 框選截圖：叫出 ShotService 的遮罩，裁好後把 PNG 從本連線回傳 */
     private static final int CTRL_REGION_SHOT = 6;
     private static final int SHOT_TIMEOUT_S = 120;   // 使用者慢慢框，別急著斷線
+    /** 框選截圖的失敗回傳碼（負數，與正常的 PNG 長度不會混淆）。 */
+    private static final int SHOT_NO_SVC = -1;       // 無障礙服務沒開
+    private static final int SHOT_FAILED = -2;       // 截圖／裁切失敗、逾時
+
+    /** regionShot 的結果：png 有圖就是成功；沒圖時 cancelled 區分「取消」和「失敗」。 */
+    private static final class ShotResult {
+        final byte[] png;
+        final boolean cancelled;
+        ShotResult(byte[] png, boolean cancelled) {
+            this.png = png;
+            this.cancelled = cancelled;
+        }
+    }
 
     private final Context context;
     private volatile ServerSocket server;
@@ -122,12 +135,27 @@ class ImageServer {
                     return;
                 }
                 if (cmd == CTRL_REGION_SHOT) {
-                    // 回傳格式：[4B len][png]；len==0 表示取消或失敗
+                    // 回傳 [4B len][png]，len 是「有號」整數：
+                    //   >0            後面接 PNG
+                    //   0             使用者取消（PC 什麼都別做）
+                    //   SHOT_NO_SVC   無障礙沒開（PC 退回全螢幕 screencap）
+                    //   SHOT_FAILED   截圖失敗／逾時（同上）
+                    // 以前三種都回 0，PC 一律當取消 → 任何失敗都變成「按了沒反應」
                     s.setSoTimeout((SHOT_TIMEOUT_S + 10) * 1000);
-                    byte[] png = regionShot();
                     DataOutputStream dos = new DataOutputStream(out);
-                    dos.writeInt(png == null ? 0 : png.length);
-                    if (png != null) dos.write(png);
+                    if (!ShotService.available()) {
+                        Log.w(TAG, "ImageServer: ShotService 未啟用（無障礙權限沒開）");
+                        dos.writeInt(SHOT_NO_SVC);
+                        dos.flush();
+                        return;
+                    }
+                    ShotResult r = regionShot();
+                    if (r.png != null && r.png.length > 0) {
+                        dos.writeInt(r.png.length);
+                        dos.write(r.png);
+                    } else {
+                        dos.writeInt(r.cancelled ? 0 : SHOT_FAILED);
+                    }
                     dos.flush();
                     return;
                 }
@@ -185,33 +213,38 @@ class ImageServer {
     }
 
     /**
-     * 叫出框選遮罩並等使用者框完。回傳裁切後的 PNG；取消/逾時/服務沒開回 null。
-     * 服務沒啟用時回 null，PC 端會自己退回全螢幕 screencap。
+     * 叫出框選遮罩並等使用者框完。
+     *
+     * 沒圖時 cancelled 要誠實：只有使用者自己取消（Esc/右鍵/框太小）才算取消，
+     * 逾時和系統太舊都算失敗，讓 PC 端退回全螢幕 screencap 而不是靜默放棄。
      */
-    private byte[] regionShot() {
+    private ShotResult regionShot() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             Log.w(TAG, "ImageServer: 系統版本不支援 takeScreenshot");
-            return null;
+            return new ShotResult(null, false);
         }
         final CountDownLatch latch = new CountDownLatch(1);
         final byte[][] box = new byte[1][];
-        boolean started = ShotService.trigger(png -> {
+        final boolean[] cancelled = new boolean[1];
+        boolean started = ShotService.trigger((png, wasCancelled) -> {
             box[0] = png;
+            cancelled[0] = wasCancelled;
             latch.countDown();
         });
         if (!started) {
+            // 理論上呼叫端已先擋掉，留著防呼叫端漏檢
             Log.w(TAG, "ImageServer: ShotService 未啟用（無障礙權限沒開）");
-            return null;
+            return new ShotResult(null, false);
         }
         try {
             if (!latch.await(SHOT_TIMEOUT_S, TimeUnit.SECONDS)) {
                 Log.w(TAG, "ImageServer: 框選逾時");
-                return null;
+                return new ShotResult(null, false);
             }
         } catch (InterruptedException e) {
-            return null;
+            return new ShotResult(null, false);
         }
-        return box[0];
+        return new ShotResult(box[0], cancelled[0]);
     }
 
     /** 在主執行緒 setPrimaryClip，等最多 3 秒回報成功與否。 */

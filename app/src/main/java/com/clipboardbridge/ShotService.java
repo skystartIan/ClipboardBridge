@@ -73,7 +73,15 @@ public class ShotService extends AccessibilityService {
 
     /** 裁切完成後的回呼（PC 走控制指令進來時用來取回 PNG）。 */
     interface ShotCallback {
-        void onResult(byte[] png);   // 取消或失敗回 null
+        /**
+         * png != null   → 裁切好的圖
+         * png == null 且 cancelled  → 使用者自己取消（PC 不該再做別的事）
+         * png == null 且 !cancelled → 截圖失敗（PC 應退回全螢幕 screencap）
+         *
+         * 這兩者一定要分開：以前都回 null，PC 一律當成「取消」而靜默放棄，
+         * 截圖真的壞掉時使用者只會看到「按了沒反應」。
+         */
+        void onResult(byte[] png, boolean cancelled);
     }
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -186,7 +194,8 @@ public class ShotService extends AccessibilityService {
     private void start(ShotCallback cb) {
         if (!busy.compareAndSet(false, true)) {
             android.util.Log.d(TAG, "ShotService: 已有框選進行中");
-            if (cb != null) cb.onResult(null);
+            // 當成取消：另一場框選正在進行，PC 不該再插一張全螢幕進來
+            if (cb != null) cb.onResult(null, true);
             return;
         }
         pending = cb;
@@ -248,10 +257,11 @@ public class ShotService extends AccessibilityService {
         }
     }
 
+    /** msg == null ＝ 使用者主動取消（Esc/返回/右鍵）；有 msg ＝ 真的失敗。 */
     private void fail(String msg) {
         removeOverlay();
         if (shot != null) { shot.recycle(); shot = null; }
-        if (pending != null) { pending.onResult(null); pending = null; }
+        if (pending != null) { pending.onResult(null, msg == null); pending = null; }
         busy.set(false);
         if (msg != null) Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
     }
@@ -265,8 +275,9 @@ public class ShotService extends AccessibilityService {
         pending = null;
         try {
             if (full == null || r == null || r.width() < 8 || r.height() < 8) {
-                if (cb != null) cb.onResult(null);
-                return;   // 太小＝當成取消（誤點一下不該產生東西）
+                // 太小＝當成取消（誤點一下不該產生東西）。full==null 才是真失敗
+                if (cb != null) cb.onResult(null, full != null);
+                return;
             }
             r.intersect(0, 0, full.getWidth(), full.getHeight());
             Bitmap crop = Bitmap.createBitmap(full, r.left, r.top,
@@ -292,10 +303,10 @@ public class ShotService extends AccessibilityService {
             Toast.makeText(this, "✓ 已複製 " + crop.getWidth() + "×"
                     + crop.getHeight(), Toast.LENGTH_SHORT).show();
             crop.recycle();
-            if (cb != null) cb.onResult(png);
+            if (cb != null) cb.onResult(png, false);
         } catch (Exception e) {
             android.util.Log.e(TAG, "ShotService finish failed: " + e);
-            if (cb != null) cb.onResult(null);
+            if (cb != null) cb.onResult(null, false);   // 例外＝失敗，不是取消
         } finally {
             if (full != null) full.recycle();
             busy.set(false);
