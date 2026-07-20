@@ -1,6 +1,6 @@
 @echo off
 set PATH=D:\Trial\PortableGit\bin;%PATH%
-cd /d D:\Trial\Scrcpy\Clipboard\ClipboardBridge
+cd /d %~dp0
 git add -A
 git commit -m "Update"
 git push

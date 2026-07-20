@@ -21,11 +21,15 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Toast;
 
 import androidx.annotation.RequiresApi;
 
 import java.io.ByteArrayOutputStream;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -42,12 +46,30 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * 用 AccessibilityService 的 takeScreenshot 而非 MediaProjection：後者每次
  * 都要跳授權彈窗，前者只要服務開著就能直接截，適合當熱鍵用。
+ *
+ * F1 放行（PASSTHROUGH）：前景是遠端桌面時不接手，讓 F1 原封不動傳進去給
+ * 遠端 PC 的截圖軟體（Snipaste 也是 F1）。無障礙服務攔鍵是全系統的，不放行
+ * 的話遠端那邊永遠收不到。判斷放在這裡是因為只有平板知道自己前景是誰——
+ * PC 端 Sync 猜不到，所以它現在也不攔 F1，一律轉發過來由這裡決定。
+ *
+ * 前景判斷用兩層（見 currentPkg）：按鍵當下直接查 getRootInActiveWindow，
+ * 查不到才退回視窗切換事件記下的 topPkg。單靠事件會有空窗期，剛裝完 APK
+ * 停在 RDP 裡按第一次 F1 就會誤判。
  */
 @RequiresApi(api = Build.VERSION_CODES.R)   // takeScreenshot() 是 API 30 起才有
 public class ShotService extends AccessibilityService {
 
     private static final String TAG = ClipboardReceiver.TAG;
     private static volatile ShotService instance;
+
+    /** 前景是這些 App 時 F1 不接手，原樣放行（遠端桌面 → 讓遠端的 Snipaste 收到）。 */
+    private static final Set<String> PASSTHROUGH = new HashSet<>(Arrays.asList(
+            "com.microsoft.rdc.androidx"));      // Windows App（遠端桌面）
+
+    /** 這些只是暫時蓋上來的視窗，不代表使用者換了 App，不能拿來更新 topPkg。 */
+    private static final Set<String> TRANSIENT = new HashSet<>(Arrays.asList(
+            "com.android.systemui",              // 通知欄／快捷面板
+            "com.google.android.inputmethod.latin"));   // Gboard
 
     /** 裁切完成後的回呼（PC 走控制指令進來時用來取回 PNG）。 */
     interface ShotCallback {
@@ -60,6 +82,8 @@ public class ShotService extends AccessibilityService {
     private SelectView view;
     private Bitmap shot;
     private ShotCallback pending;
+    /** 目前前景 App 的套件名（由 typeWindowStateChanged 事件維護）。 */
+    private volatile String topPkg = "";
 
     static ShotService get() {
         return instance;
@@ -83,17 +107,68 @@ public class ShotService extends AccessibilityService {
         super.onDestroy();
     }
 
+    /** 只為了記住前景是誰（shot_service.xml 已宣告 typeWindowStateChanged）。 */
     @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) { }
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+        CharSequence p = event.getPackageName();
+        if (p == null) return;
+        String pkg = p.toString();
+        // 輸入法／通知欄蓋上來不算換 App；自己的框選遮罩更不算
+        if (TRANSIENT.contains(pkg) || getPackageName().equals(pkg)) return;
+        topPkg = pkg;
+    }
 
     @Override
     public void onInterrupt() { }
+
+    /**
+     * 按鍵當下的前景套件名。
+     *
+     * 優先直接問系統（getRootInActiveWindow），問不到才退回事件記錄的 topPkg。
+     * 只靠事件不夠：服務剛啟用／剛開機時還沒收過任何視窗切換事件，topPkg 是空
+     * 的，那時人若正停在 RDP 裡按 F1 就會被誤判成要截平板。
+     */
+    private String currentPkg() {
+        AccessibilityNodeInfo root = null;
+        try {
+            root = getRootInActiveWindow();
+            if (root != null) {
+                CharSequence p = root.getPackageName();
+                if (p != null) {
+                    String pkg = p.toString();
+                    // 輸入法／通知欄疊在上面時別採信，退回上一個真正的 App
+                    if (!TRANSIENT.contains(pkg) && !getPackageName().equals(pkg)) {
+                        return pkg;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "ShotService: 查前景失敗，改用事件記錄: " + t);
+        } finally {
+            if (root != null) {
+                try { root.recycle(); } catch (Throwable ignore) { }
+            }
+        }
+        return topPkg;
+    }
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
         // 只吃 F1 按下；其餘一律放行，別影響正常打字
         if (event.getKeyCode() == KeyEvent.KEYCODE_F1) {
-            if (event.getAction() == KeyEvent.ACTION_DOWN) start(null);
+            String pkg = currentPkg();
+            if (PASSTHROUGH.contains(pkg)) {
+                // 前景是遠端桌面 → 這顆 F1 是要給遠端 PC 的，別攔
+                if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                    android.util.Log.d(TAG, "ShotService: F1 放行給 " + pkg);
+                }
+                return false;
+            }
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                android.util.Log.d(TAG, "ShotService: F1 接手截圖（前景 " + pkg + "）");
+                start(null);
+            }
             return true;   // 連 UP 一起吃掉，免得落單的放開被下層收到
         }
         return false;
