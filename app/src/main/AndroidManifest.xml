@@ -68,6 +68,18 @@
             </intent-filter>
         </service>
 
+        <!-- 分享檔案給 LINE 用（LineShare）：由 App 自己授權 URI，
+             shell 身分的 adb 做不到這件事 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.clipboardbridge.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="com.clipboardbridge.shizuku"

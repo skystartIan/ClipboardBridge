@@ -35,6 +35,8 @@ class ImageServer {
     private static final String TAG = ClipboardReceiver.TAG;
     static final int PORT = 9998;
     private static final int MAX_BYTES = 20 * 1024 * 1024;
+    /** 控制指令 0-4 是 DropZone 的（見 DropZone.onControl）；5 = 分享檔案給 LINE */
+    private static final int CTRL_SHARE_FILE = 5;
 
     private final Context context;
     private volatile ServerSocket server;
@@ -97,6 +99,24 @@ class ImageServer {
                 // 控制訊框：len==0 + 1 byte 指令 → DropZone（檔案拖放投放區）
                 int cmd = in.read();
                 String ip = s.getInetAddress().getHostAddress();
+                if (cmd == CTRL_SHARE_FILE) {
+                    // 分享指令額外帶參數：[4B pathLen][path utf-8]
+                    int plen = in.readInt();
+                    if (plen <= 0 || plen > 4096) {
+                        Log.e(TAG, "ImageServer: bad share path length " + plen);
+                        out.write(0);
+                        out.flush();
+                        return;
+                    }
+                    byte[] pb = new byte[plen];
+                    in.readFully(pb);
+                    String path = new String(pb, "UTF-8");
+                    Log.d(TAG, "ImageServer: share " + path + " from " + ip);
+                    boolean ok = LineShare.share(context, path);
+                    out.write(ok ? 1 : 0);
+                    out.flush();
+                    return;
+                }
                 Log.d(TAG, "ImageServer: DropZone ctrl " + cmd + " from " + ip);
                 DropZone.get(context).onControl(cmd, ip);
                 out.write(1);
