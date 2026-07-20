@@ -1,0 +1,315 @@
+package com.clipboardbridge;
+
+import android.accessibilityservice.AccessibilityService;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Display;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.WindowManager;
+import android.view.accessibility.AccessibilityEvent;
+import android.widget.Toast;
+
+import androidx.annotation.RequiresApi;
+
+import java.io.ByteArrayOutputStream;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * 框選截圖（M8）。
+ *
+ * 兩個入口，同一段流程：
+ *   1. 硬體鍵盤按 F1 → onKeyEvent（電腦關機、藍牙鍵盤直連平板時唯一的路）
+ *   2. PC 送 ImageServer 控制指令 6（滑鼠焦點在平板、Sync 攔下 F1 時）
+ *
+ * 流程：takeScreenshot() 抓當下畫面 → 蓋上全螢幕遮罩顯示那張凍結畫面 →
+ * 使用者拖出矩形 → 裁切 → 寫進平板剪貼簿；PC 那邊若在等（走控制指令
+ * 進來的），另外把 PNG 從原連線回傳讓它寫進 Windows 剪貼簿。
+ *
+ * 用 AccessibilityService 的 takeScreenshot 而非 MediaProjection：後者每次
+ * 都要跳授權彈窗，前者只要服務開著就能直接截，適合當熱鍵用。
+ */
+@RequiresApi(api = Build.VERSION_CODES.R)   // takeScreenshot() 是 API 30 起才有
+public class ShotService extends AccessibilityService {
+
+    private static final String TAG = ClipboardReceiver.TAG;
+    private static volatile ShotService instance;
+
+    /** 裁切完成後的回呼（PC 走控制指令進來時用來取回 PNG）。 */
+    interface ShotCallback {
+        void onResult(byte[] png);   // 取消或失敗回 null
+    }
+
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final AtomicBoolean busy = new AtomicBoolean(false);
+    private WindowManager wm;
+    private SelectView view;
+    private Bitmap shot;
+    private ShotCallback pending;
+
+    static ShotService get() {
+        return instance;
+    }
+
+    /** 服務是否已被使用者啟用（PC 端可據此決定要不要退回自己截圖）。 */
+    static boolean available() {
+        return instance != null;
+    }
+
+    @Override
+    protected void onServiceConnected() {
+        instance = this;
+        wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        android.util.Log.d(TAG, "ShotService connected");
+    }
+
+    @Override
+    public void onDestroy() {
+        instance = null;
+        super.onDestroy();
+    }
+
+    @Override
+    public void onAccessibilityEvent(AccessibilityEvent event) { }
+
+    @Override
+    public void onInterrupt() { }
+
+    @Override
+    protected boolean onKeyEvent(KeyEvent event) {
+        // 只吃 F1 按下；其餘一律放行，別影響正常打字
+        if (event.getKeyCode() == KeyEvent.KEYCODE_F1) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) start(null);
+            return true;   // 連 UP 一起吃掉，免得落單的放開被下層收到
+        }
+        return false;
+    }
+
+    /** 給 ImageServer 用的入口；cb 可為 null（純平板端操作，不必回傳）。 */
+    static boolean trigger(ShotCallback cb) {
+        ShotService s = instance;
+        if (s == null) return false;
+        s.main.post(() -> s.start(cb));
+        return true;
+    }
+
+    // ── 截圖 → 遮罩 ─────────────────────────────────────
+    private void start(ShotCallback cb) {
+        if (!busy.compareAndSet(false, true)) {
+            android.util.Log.d(TAG, "ShotService: 已有框選進行中");
+            if (cb != null) cb.onResult(null);
+            return;
+        }
+        pending = cb;
+        takeScreenshot(Display.DEFAULT_DISPLAY,
+                Executors.newSingleThreadExecutor(),
+                new TakeScreenshotCallback() {
+                    @Override
+                    public void onSuccess(ScreenshotResult r) {
+                        Bitmap bmp = null;
+                        try (HardwareBuffer hb = r.getHardwareBuffer()) {
+                            Bitmap raw = Bitmap.wrapHardwareBuffer(hb, r.getColorSpace());
+                            if (raw != null) {
+                                // 硬體 bitmap 不能直接裁切/壓縮 → 複製成軟體的
+                                bmp = raw.copy(Bitmap.Config.ARGB_8888, false);
+                                raw.recycle();
+                            }
+                        } catch (Exception e) {
+                            android.util.Log.e(TAG, "ShotService wrap failed: " + e);
+                        }
+                        final Bitmap b = bmp;
+                        main.post(() -> {
+                            if (b == null) fail("截圖失敗");
+                            else showOverlay(b);
+                        });
+                    }
+
+                    @Override
+                    public void onFailure(int errorCode) {
+                        android.util.Log.e(TAG, "takeScreenshot failed " + errorCode);
+                        main.post(() -> fail("截圖失敗(" + errorCode + ")"));
+                    }
+                });
+    }
+
+    private void showOverlay(Bitmap bmp) {
+        shot = bmp;
+        try {
+            view = new SelectView(this);
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            wm.addView(view, lp);
+            view.setFocusableInTouchMode(true);
+            view.requestFocus();
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "ShotService addView failed: " + e);
+            fail("無法顯示框選遮罩");
+        }
+    }
+
+    private void removeOverlay() {
+        if (view != null) {
+            try { wm.removeView(view); } catch (Exception ignore) { }
+            view = null;
+        }
+    }
+
+    private void fail(String msg) {
+        removeOverlay();
+        if (shot != null) { shot.recycle(); shot = null; }
+        if (pending != null) { pending.onResult(null); pending = null; }
+        busy.set(false);
+        if (msg != null) Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+    }
+
+    // ── 裁切 → 剪貼簿 ───────────────────────────────────
+    private void finish(Rect r) {
+        Bitmap full = shot;
+        ShotCallback cb = pending;
+        removeOverlay();
+        shot = null;
+        pending = null;
+        try {
+            if (full == null || r == null || r.width() < 8 || r.height() < 8) {
+                if (cb != null) cb.onResult(null);
+                return;   // 太小＝當成取消（誤點一下不該產生東西）
+            }
+            r.intersect(0, 0, full.getWidth(), full.getHeight());
+            Bitmap crop = Bitmap.createBitmap(full, r.left, r.top,
+                    Math.max(1, r.width()), Math.max(1, r.height()));
+
+            Uri uri = MediaStoreUtils.saveBitmap(this, crop);
+            if (uri != null) {
+                ClipboardManager cm = (ClipboardManager)
+                        getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
+                }
+                MediaStoreUtils.deleteOthers(this, uri);
+            }
+            byte[] png = null;
+            if (cb != null) {
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                crop.compress(Bitmap.CompressFormat.PNG, 100, bos);
+                png = bos.toByteArray();
+            }
+            android.util.Log.d(TAG, "ShotService: 裁切 " + crop.getWidth()
+                    + "x" + crop.getHeight() + " → 剪貼簿");
+            Toast.makeText(this, "✓ 已複製 " + crop.getWidth() + "×"
+                    + crop.getHeight(), Toast.LENGTH_SHORT).show();
+            crop.recycle();
+            if (cb != null) cb.onResult(png);
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "ShotService finish failed: " + e);
+            if (cb != null) cb.onResult(null);
+        } finally {
+            if (full != null) full.recycle();
+            busy.set(false);
+        }
+    }
+
+    // ── 框選視圖 ────────────────────────────────────────
+    @SuppressWarnings("ViewConstructor")
+    private class SelectView extends View {
+        private final Paint dim = new Paint();
+        private final Paint border = new Paint();
+        private final Paint hint = new Paint();
+        private float x0, y0, x1, y1;
+        private boolean dragging;
+
+        SelectView(Context c) {
+            super(c);
+            dim.setColor(Color.argb(120, 0, 0, 0));
+            border.setColor(Color.argb(255, 60, 170, 255));
+            border.setStyle(Paint.Style.STROKE);
+            border.setStrokeWidth(3f);
+            hint.setColor(Color.WHITE);
+            hint.setTextSize(34f);
+            hint.setAntiAlias(true);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            if (shot != null) canvas.drawBitmap(shot, 0, 0, null);
+            if (!dragging) {
+                canvas.drawRect(0, 0, getWidth(), getHeight(), dim);
+                canvas.drawText("拖曳框選要複製的範圍（Esc 或右鍵取消）",
+                        60, 90, hint);
+                return;
+            }
+            Rect r = rect();
+            // 四周變暗、選取區保持原樣
+            canvas.drawRect(0, 0, getWidth(), r.top, dim);
+            canvas.drawRect(0, r.bottom, getWidth(), getHeight(), dim);
+            canvas.drawRect(0, r.top, r.left, r.bottom, dim);
+            canvas.drawRect(r.right, r.top, getWidth(), r.bottom, dim);
+            canvas.drawRect(r, border);
+            canvas.drawText(r.width() + " × " + r.height(),
+                    r.left, Math.max(40, r.top - 14), hint);
+        }
+
+        private Rect rect() {
+            return new Rect((int) Math.min(x0, x1), (int) Math.min(y0, y1),
+                    (int) Math.max(x0, x1), (int) Math.max(y0, y1));
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    // 右鍵＝取消（滑鼠操作時很自然）
+                    if ((e.getButtonState() & MotionEvent.BUTTON_SECONDARY) != 0) {
+                        fail(null);
+                        return true;
+                    }
+                    x0 = x1 = e.getX();
+                    y0 = y1 = e.getY();
+                    dragging = true;
+                    invalidate();
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    x1 = e.getX();
+                    y1 = e.getY();
+                    invalidate();
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    x1 = e.getX();
+                    y1 = e.getY();
+                    finish(rect());
+                    return true;
+                case MotionEvent.ACTION_CANCEL:
+                    fail(null);
+                    return true;
+            }
+            return super.onTouchEvent(e);
+        }
+
+        @Override
+        public boolean onKeyDown(int keyCode, KeyEvent e) {
+            if (keyCode == KeyEvent.KEYCODE_ESCAPE || keyCode == KeyEvent.KEYCODE_BACK) {
+                fail(null);
+                return true;
+            }
+            return super.onKeyDown(keyCode, e);
+        }
+    }
+}

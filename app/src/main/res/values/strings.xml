@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shot_service_desc">按 F1 框選畫面複製到剪貼簿。需要此權限才能收到硬體鍵盤按鍵並直接截圖（不必每次跳授權彈窗）。</string>
+</resources>

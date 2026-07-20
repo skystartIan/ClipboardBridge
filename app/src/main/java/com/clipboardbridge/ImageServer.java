@@ -14,6 +14,7 @@ import android.util.Log;
 import android.widget.Toast;
 
 import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -37,6 +38,9 @@ class ImageServer {
     private static final int MAX_BYTES = 20 * 1024 * 1024;
     /** 控制指令 0-4 是 DropZone 的（見 DropZone.onControl）；5 = 分享檔案給 LINE */
     private static final int CTRL_SHARE_FILE = 5;
+    /** 6 = 框選截圖：叫出 ShotService 的遮罩，裁好後把 PNG 從本連線回傳 */
+    private static final int CTRL_REGION_SHOT = 6;
+    private static final int SHOT_TIMEOUT_S = 120;   // 使用者慢慢框，別急著斷線
 
     private final Context context;
     private volatile ServerSocket server;
@@ -117,6 +121,16 @@ class ImageServer {
                     out.flush();
                     return;
                 }
+                if (cmd == CTRL_REGION_SHOT) {
+                    // 回傳格式：[4B len][png]；len==0 表示取消或失敗
+                    s.setSoTimeout((SHOT_TIMEOUT_S + 10) * 1000);
+                    byte[] png = regionShot();
+                    DataOutputStream dos = new DataOutputStream(out);
+                    dos.writeInt(png == null ? 0 : png.length);
+                    if (png != null) dos.write(png);
+                    dos.flush();
+                    return;
+                }
                 Log.d(TAG, "ImageServer: DropZone ctrl " + cmd + " from " + ip);
                 DropZone.get(context).onControl(cmd, ip);
                 out.write(1);
@@ -168,6 +182,36 @@ class ImageServer {
         } catch (Exception e) {
             Log.e(TAG, "ImageServer handle error: " + e.getMessage());
         }
+    }
+
+    /**
+     * 叫出框選遮罩並等使用者框完。回傳裁切後的 PNG；取消/逾時/服務沒開回 null。
+     * 服務沒啟用時回 null，PC 端會自己退回全螢幕 screencap。
+     */
+    private byte[] regionShot() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.w(TAG, "ImageServer: 系統版本不支援 takeScreenshot");
+            return null;
+        }
+        final CountDownLatch latch = new CountDownLatch(1);
+        final byte[][] box = new byte[1][];
+        boolean started = ShotService.trigger(png -> {
+            box[0] = png;
+            latch.countDown();
+        });
+        if (!started) {
+            Log.w(TAG, "ImageServer: ShotService 未啟用（無障礙權限沒開）");
+            return null;
+        }
+        try {
+            if (!latch.await(SHOT_TIMEOUT_S, TimeUnit.SECONDS)) {
+                Log.w(TAG, "ImageServer: 框選逾時");
+                return null;
+            }
+        } catch (InterruptedException e) {
+            return null;
+        }
+        return box[0];
     }
 
     /** 在主執行緒 setPrimaryClip，等最多 3 秒回報成功與否。 */

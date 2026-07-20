@@ -57,6 +57,20 @@
             </intent-filter>
         </receiver>
 
+        <!-- 框選截圖服務：硬體 F1 鍵 + PC 控制指令 6 兩個入口 -->
+        <service
+            android:name=".ShotService"
+            android:exported="true"
+            android:label="ClipboardBridge 框選截圖"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/shot_service" />
+        </service>
+
         <!-- 通知監聽服務 -->
         <service
             android:name=".NotificationService"

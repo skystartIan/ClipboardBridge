@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 框選截圖服務（ShotService）。只為了兩件事：
+     canRequestFilterKeyEvents → 收得到硬體鍵盤的 F1（PC 關機時唯一的入口）
+     canTakeScreenshot        → takeScreenshot() 不必走 MediaProjection 授權彈窗
+     不需要視窗內容，所以 canRetrieveWindowContent 保持關閉。 -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRequestFilterKeyEvents="true"
+    android:canTakeScreenshot="true"
+    android:notificationTimeout="100"
+    android:description="@string/shot_service_desc" />
