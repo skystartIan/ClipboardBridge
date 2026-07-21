@@ -78,6 +78,13 @@ public class ShotService extends AccessibilityService {
     private static final String IME_SAMSUNG =
             "com.samsung.android.honeyboard/.service.HoneyBoardService";
 
+    /** 三星鍵盤的 en_US 子類型 hash（`adb shell ime list -a` 查得）。 */
+    private static final int SUBTYPE_EN_US = 65537;
+    /** IME 的目前子類型（@hide 常數，只能寫字串）。寫它會真的讓 IME 切換語言。 */
+    private static final String KEY_SUBTYPE = "selected_input_method_subtype";
+    /** 切 IME 是非同步的，等它換完再寫子類型，否則會寫到舊 IME 上。 */
+    private static final long IME_SETTLE_MS = 350;
+
     /**
      * 框選的保險逾時：遮罩若因故無法互動（例如停在系統設定的敏感頁面時，
      * Android 會強制隱藏所有非系統浮動視窗＝遮罩畫不出來也點不到），
@@ -107,6 +114,11 @@ public class ShotService extends AccessibilityService {
     private ShotCallback pending;
     /** 目前前景 App 的套件名（由 typeWindowStateChanged 事件維護）。 */
     private volatile String topPkg = "";
+    /** 是否正處於遠端桌面（用來做進出 RDP 的一次性切換，不是每個事件都做）。 */
+    private boolean inRdp = false;
+    /** 進 RDP 前的輸入法與子類型，離開時還原。 */
+    private String savedIme;
+    private int savedSubtype = -1;
     /** SELECT_TIMEOUT_MS 到了還沒收尾就當成取消，避免 busy 永久卡住。 */
     private final Runnable selectTimeout = () -> {
         if (busy.get()) {
@@ -151,6 +163,67 @@ public class ShotService extends AccessibilityService {
         // 輸入法／通知欄蓋上來不算換 App；自己的框選遮罩更不算
         if (TRANSIENT.contains(pkg) || getPackageName().equals(pkg)) return;
         topPkg = pkg;
+        onForegroundChanged(pkg);
+    }
+
+    /**
+     * 進出遠端桌面時自動切換平板輸入法。
+     *
+     * 在 RDP 裡打字時，平板的 IME 會先組字才把結果送進去，等於「兩層輸入法」
+     * 打架——中文要由遠端的微軟注音處理才對。所以進 RDP 就把平板鍵盤壓成
+     * 三星鍵盤的 en_US（不組字，按鍵原樣穿過去給遠端），離開再還原。
+     *
+     * 只在「進」「出」的瞬間做，不是每個視窗事件都做，免得使用者在 RDP 裡
+     * 手動改了輸入法又被我們蓋回去。
+     */
+    private void onForegroundChanged(String pkg) {
+        boolean rdp = PASSTHROUGH.contains(pkg);
+        if (rdp == inRdp) return;
+        inRdp = rdp;
+        if (rdp) {
+            savedIme = Settings.Secure.getString(
+                    getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
+            savedSubtype = currentSubtype();
+            android.util.Log.d(TAG, "ShotService: 進入 RDP，暫存 " + savedIme
+                    + " subtype=" + savedSubtype + " → 切英文");
+            applyIme(IME_SAMSUNG, SUBTYPE_EN_US);
+        } else {
+            if (savedIme != null) {
+                android.util.Log.d(TAG, "ShotService: 離開 RDP，還原 " + savedIme
+                        + " subtype=" + savedSubtype);
+                applyIme(savedIme, savedSubtype);
+            }
+            savedIme = null;
+            savedSubtype = -1;
+        }
+    }
+
+    private int currentSubtype() {
+        try {
+            return Settings.Secure.getInt(getContentResolver(), KEY_SUBTYPE, -1);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** 切到指定輸入法，並在它換完之後寫入子類型（順序不能反）。 */
+    private void applyIme(String ime, int subtype) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return;
+        try {
+            getSoftKeyboardController().switchToInputMethod(ime);
+        } catch (Throwable t) {
+            android.util.Log.e(TAG, "ShotService: 切輸入法失敗: " + t);
+        }
+        if (subtype <= 0) return;
+        main.postDelayed(() -> {
+            try {
+                // 需要 WRITE_SECURE_SETTINGS（用 adb pm grant 授予，簽章固定所以不會掉）
+                Settings.Secure.putInt(getContentResolver(), KEY_SUBTYPE, subtype);
+            } catch (Throwable t) {
+                android.util.Log.e(TAG, "ShotService: 寫子類型失敗（缺 "
+                        + "WRITE_SECURE_SETTINGS？）: " + t);
+            }
+        }, IME_SETTLE_MS);
     }
 
     @Override
