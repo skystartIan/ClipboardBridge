@@ -15,6 +15,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.Display;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -71,6 +72,20 @@ public class ShotService extends AccessibilityService {
             "com.android.systemui",              // 通知欄／快捷面板
             "com.google.android.inputmethod.latin"));   // Gboard
 
+    /** Ctrl+Space 在這兩個輸入法之間切換（見 switchIme）。 */
+    private static final String IME_GBOARD =
+            "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME";
+    private static final String IME_SAMSUNG =
+            "com.samsung.android.honeyboard/.service.HoneyBoardService";
+
+    /**
+     * 框選的保險逾時：遮罩若因故無法互動（例如停在系統設定的敏感頁面時，
+     * Android 會強制隱藏所有非系統浮動視窗＝遮罩畫不出來也點不到），
+     * finish()／fail() 永遠不會被呼叫，busy 就會永久卡住，之後在任何 App
+     * 按 F1 都會被擋在 start() 第一行。給它一個上限自動收掉。
+     */
+    private static final long SELECT_TIMEOUT_MS = 45_000;
+
     /** 裁切完成後的回呼（PC 走控制指令進來時用來取回 PNG）。 */
     interface ShotCallback {
         /**
@@ -92,6 +107,13 @@ public class ShotService extends AccessibilityService {
     private ShotCallback pending;
     /** 目前前景 App 的套件名（由 typeWindowStateChanged 事件維護）。 */
     private volatile String topPkg = "";
+    /** SELECT_TIMEOUT_MS 到了還沒收尾就當成取消，避免 busy 永久卡住。 */
+    private final Runnable selectTimeout = () -> {
+        if (busy.get()) {
+            android.util.Log.w(TAG, "ShotService: 框選逾時，自動取消（遮罩可能被系統隱藏）");
+            fail("框選已逾時取消");
+        }
+    };
 
     static ShotService get() {
         return instance;
@@ -112,6 +134,10 @@ public class ShotService extends AccessibilityService {
     @Override
     public void onDestroy() {
         instance = null;
+        // 服務被關掉（或使用者關開無障礙來重置）時把殘留的遮罩收乾淨，
+        // 否則那個視窗會一直掛在 WindowManager 上。
+        main.removeCallbacks(selectTimeout);
+        if (busy.get()) fail(null);
         super.onDestroy();
     }
 
@@ -163,7 +189,7 @@ public class ShotService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
-        // 只吃 F1 按下；其餘一律放行，別影響正常打字
+        // 只吃 F1 與 Ctrl+Space；其餘一律放行，別影響正常打字
         if (event.getKeyCode() == KeyEvent.KEYCODE_F1) {
             String pkg = currentPkg();
             if (PASSTHROUGH.contains(pkg)) {
@@ -174,12 +200,62 @@ public class ShotService extends AccessibilityService {
                 return false;
             }
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                android.util.Log.d(TAG, "ShotService: F1 接手截圖（前景 " + pkg + "）");
-                start(null);
+                if (busy.get()) {
+                    // 已經有一場在進行 → 這次 F1 當「取消」。看不見遮罩時
+                    // 這是使用者唯一的自救路徑（再按一次就能重新開始）。
+                    android.util.Log.d(TAG, "ShotService: F1 取消進行中的框選");
+                    fail(null);
+                } else {
+                    android.util.Log.d(TAG, "ShotService: F1 接手截圖（前景 " + pkg + "）");
+                    start(null);
+                }
             }
             return true;   // 連 UP 一起吃掉，免得落單的放開被下層收到
         }
+        if (event.getKeyCode() == KeyEvent.KEYCODE_SPACE && event.isCtrlPressed()) {
+            String pkg = currentPkg();
+            if (PASSTHROUGH.contains(pkg)) {
+                // 遠端桌面：Ctrl+Space 是要給遠端 Windows 切它自己的輸入法的
+                return false;
+            }
+            if (event.getAction() == KeyEvent.ACTION_DOWN) switchIme();
+            return true;
+        }
         return false;
+    }
+
+    /**
+     * Ctrl+Space 在 Gboard 與三星鍵盤之間切換。
+     *
+     * 為什麼做在這裡而不是靠系統：三星鍵盤自己會把 Ctrl+Space 當成內部的
+     * 中／英切換而吃掉，所以一旦切到三星鍵盤就再也回不去 Gboard。無障礙的
+     * 攔鍵層比 IME 更早拿到按鍵，在這裡攔就搶得贏。
+     *
+     * 也因為是攔實體按鍵，Sync 的 UHID 鍵盤（筆電鍵盤跨屏過來）和直連的藍牙
+     * 鍵盤走的是同一條路，兩種情境都吃得到，不必依賴 PC 端。
+     */
+    private void switchIme() {
+        String now = Settings.Secure.getString(
+                getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
+        String target = (now != null && now.startsWith("com.google.android.inputmethod.latin"))
+                ? IME_SAMSUNG : IME_GBOARD;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            android.util.Log.w(TAG, "ShotService: switchToInputMethod 需要 API 33");
+            return;
+        }
+        boolean ok = false;
+        try {
+            ok = getSoftKeyboardController().switchToInputMethod(target);
+        } catch (Throwable t) {
+            android.util.Log.e(TAG, "ShotService: 切換輸入法失敗: " + t);
+        }
+        android.util.Log.d(TAG, "ShotService: Ctrl+Space " + now + " → " + target
+                + (ok ? " ok" : " 失敗"));
+        if (ok) {
+            Toast.makeText(this,
+                    target.equals(IME_GBOARD) ? "Gboard" : "三星鍵盤",
+                    Toast.LENGTH_SHORT).show();
+        }
     }
 
     /** 給 ImageServer 用的入口；cb 可為 null（純平板端操作，不必回傳）。 */
@@ -199,6 +275,8 @@ public class ShotService extends AccessibilityService {
             return;
         }
         pending = cb;
+        main.removeCallbacks(selectTimeout);
+        main.postDelayed(selectTimeout, SELECT_TIMEOUT_MS);
         takeScreenshot(Display.DEFAULT_DISPLAY,
                 Executors.newSingleThreadExecutor(),
                 new TakeScreenshotCallback() {
@@ -259,6 +337,7 @@ public class ShotService extends AccessibilityService {
 
     /** msg == null ＝ 使用者主動取消（Esc/返回/右鍵）；有 msg ＝ 真的失敗。 */
     private void fail(String msg) {
+        main.removeCallbacks(selectTimeout);
         removeOverlay();
         if (shot != null) { shot.recycle(); shot = null; }
         if (pending != null) { pending.onResult(null, msg == null); pending = null; }
@@ -268,6 +347,7 @@ public class ShotService extends AccessibilityService {
 
     // ── 裁切 → 剪貼簿 ───────────────────────────────────
     private void finish(Rect r) {
+        main.removeCallbacks(selectTimeout);
         Bitmap full = shot;
         ShotCallback cb = pending;
         removeOverlay();
