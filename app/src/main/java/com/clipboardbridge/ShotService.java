@@ -116,9 +116,6 @@ public class ShotService extends AccessibilityService {
     private volatile String topPkg = "";
     /** 是否正處於遠端桌面（用來做進出 RDP 的一次性切換，不是每個事件都做）。 */
     private boolean inRdp = false;
-    /** 進 RDP 前的輸入法與子類型，離開時還原。 */
-    private String savedIme;
-    private int savedSubtype = -1;
     /** SELECT_TIMEOUT_MS 到了還沒收尾就當成取消，避免 busy 永久卡住。 */
     private final Runnable selectTimeout = () -> {
         if (busy.get()) {
@@ -175,34 +172,24 @@ public class ShotService extends AccessibilityService {
      *
      * 只在「進」「出」的瞬間做，不是每個視窗事件都做，免得使用者在 RDP 裡
      * 手動改了輸入法又被我們蓋回去。
+     *
+     * 離開時固定切回 Gboard、**不指定子類型**：Android 本來就有 per-IME 的
+     * 子類型歷史（settings 的 input_methods_subtype_history），切回某個 IME
+     * 時系統會自動套用它上次用的語言。早期版本改成「進去前暫存、出來寫回」，
+     * 實測還原不了——沒有輸入框取得焦點時 selected_input_method_subtype 只是
+     * 紀錄，IME 真實狀態會重新同步，暫存到的往往已經是被改過的值。交給系統
+     * 的歷史機制反而準。
      */
     private void onForegroundChanged(String pkg) {
         boolean rdp = PASSTHROUGH.contains(pkg);
         if (rdp == inRdp) return;
         inRdp = rdp;
         if (rdp) {
-            savedIme = Settings.Secure.getString(
-                    getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
-            savedSubtype = currentSubtype();
-            android.util.Log.d(TAG, "ShotService: 進入 RDP，暫存 " + savedIme
-                    + " subtype=" + savedSubtype + " → 切英文");
+            android.util.Log.d(TAG, "ShotService: 進入 RDP → 三星鍵盤 en_US");
             applyIme(IME_SAMSUNG, SUBTYPE_EN_US);
         } else {
-            if (savedIme != null) {
-                android.util.Log.d(TAG, "ShotService: 離開 RDP，還原 " + savedIme
-                        + " subtype=" + savedSubtype);
-                applyIme(savedIme, savedSubtype);
-            }
-            savedIme = null;
-            savedSubtype = -1;
-        }
-    }
-
-    private int currentSubtype() {
-        try {
-            return Settings.Secure.getInt(getContentResolver(), KEY_SUBTYPE, -1);
-        } catch (Throwable t) {
-            return -1;
+            android.util.Log.d(TAG, "ShotService: 離開 RDP → Gboard（沿用上次語言）");
+            applyIme(IME_GBOARD, 0);   // 0 ＝ 不寫子類型，讓系統從歷史還原
         }
     }
 
