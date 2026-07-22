@@ -48,6 +48,12 @@ class ImageServer {
      */
     private static final int CTRL_SELECT_TEXT = 7;
     private static final int CTRL_COPY_TEXT = 8;
+    /**
+     * 9 = 問「要不要幫忙點一下收合全選、點哪裡」。回 [1B 要不要][4B x][4B y]。
+     * LINE 進選取模式後預設整則全選，實測只有「在文字上點一下」收得掉，而
+     * 選取畫面每次出現的位置都不一樣 → 座標只能由平板端提供。
+     */
+    private static final int CTRL_COLLAPSE_HINT = 9;
     private static final int SHOT_TIMEOUT_S = 120;   // 使用者慢慢框，別急著斷線
     /** 框選截圖的失敗回傳碼（負數，與正常的 PNG 長度不會混淆）。 */
     private static final int SHOT_NO_SVC = -1;       // 無障礙服務沒開
@@ -164,6 +170,17 @@ class ImageServer {
                     } else {
                         dos.writeInt(r.cancelled ? 0 : SHOT_FAILED);
                     }
+                    dos.flush();
+                    return;
+                }
+                if (cmd == CTRL_COLLAPSE_HINT) {
+                    int[] p = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                            && ShotService.available())
+                            ? ShotService.collapseHint() : null;
+                    DataOutputStream dos = new DataOutputStream(out);
+                    dos.write(p == null ? 0 : 1);
+                    dos.writeInt(p == null ? 0 : p[0]);
+                    dos.writeInt(p == null ? 0 : p[1]);
                     dos.flush();
                     return;
                 }

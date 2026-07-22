@@ -175,6 +175,10 @@ public class ShotService extends AccessibilityService {
     private int staleMenuWindow = -1;
     /** 早於這個時間點找到的選單一律不採信（見 MENU_MIN_WAIT_MS）。 */
     private long menuNotBefore = 0;
+    /** 這次點的那則訊息的文字——用來在選取畫面裡認出同一則。 */
+    private volatile String pickText;
+    /** 需要 PC 幫忙點一下才收得掉全選時，要點的範圍（見 collapseSelection）。 */
+    private volatile Rect collapseRect;
     private View mask;
     private Bitmap maskShot;
     /** 遮罩無條件收掉，不管流程走到哪一步。 */
@@ -460,6 +464,8 @@ public class ShotService extends AccessibilityService {
         // 沒有 getText()，於是連長按都不會發生，也就不會冒出選單閃一下。
         final AccessibilityNodeInfo node = findTextNodeAt(x, y);
         if (node == null) return false;
+        pickText = node.getText() == null ? null : node.getText().toString().trim();
+        collapseRect = null;
         picking = true;
         main.removeCallbacks(maskTimeout);
         main.postDelayed(maskTimeout, MASK_TIMEOUT_MS);
@@ -608,27 +614,35 @@ public class ShotService extends AccessibilityService {
     /**
      * 解除 LINE 選取模式預設的「整則全選」，讓滑鼠可以直接拖曳框選。
      *
-     * 不能用注入方向鍵：LINE 的訊息是**不可編輯**的 TextView，方向鍵在這種
-     * view 上只會移動焦點、不會收合選取（實測無效）。用無障礙的
-     * ACTION_SET_SELECTION、start==end 把選取收合成一個插入點才是對的工具。
+     * 兩條路，依序試：
+     *  1. 無障礙 ACTION_SET_SELECTION(0,0) 把選取收合成插入點。實測 LINE 的
+     *     選取畫面**不吃**（ok=false），但別的 App／別的版本可能可以，成本
+     *     是零就留著。
+     *  2. 記下該文字節點的中心座標，交給 PC 用 UHID 在那裡點一下——實測那
+     *     是唯一收得掉的方法（使用者手動驗證過）。座標由這裡提供是必要的：
+     *     選取畫面每次出現的位置都不一樣，PC 猜不到。
      *
-     * 目標節點＝所有視窗裡「支援 ACTION_SET_SELECTION 且文字最長」的那個
-     * ——選取畫面顯示的就是整則訊息，必定是畫面上最長的一段。
+     * ❌ 不能用注入方向鍵：LINE 的訊息是不可編輯的 TextView，方向鍵不會收合
+     * 選取，反而會把焦點移到左邊的聊天室清單去（使用者實測）。
+     *
+     * 目標節點＝文字與這次點的那則**完全相同**的那個。早期版本取「畫面上
+     * 文字最長且支援 SET_SELECTION 的節點」，實測會抓到 235 字的無關節點。
      */
     private void collapseSelection() {
+        collapseRect = null;
         try {
+            if (pickText == null || pickText.isEmpty()) return;
             AccessibilityNodeInfo target = null;
-            int longest = 0;
             for (AccessibilityNodeInfo root : roots()) {
-                Best2 b = new Best2();
-                findSelectable(root, b);
-                if (b.node != null && b.len > longest) {
-                    longest = b.len;
-                    target = b.node;
+                AccessibilityNodeInfo n = findByTextIn(root, pickText);
+                if (n != null) {
+                    target = n;
+                    // 聊天室裡那個原始節點也會命中，但選取畫面的那個在別的
+                    // 視窗；兩個都可以當點擊目標，取最後找到的即可
                 }
             }
             if (target == null) {
-                android.util.Log.d(TAG, "ShotService: 找不到可收合選取的節點");
+                android.util.Log.d(TAG, "ShotService: 找不到要收合的文字節點");
                 return;
             }
             android.os.Bundle args = new android.os.Bundle();
@@ -636,30 +650,28 @@ public class ShotService extends AccessibilityService {
             args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 0);
             boolean ok = target.performAction(
                     AccessibilityNodeInfo.ACTION_SET_SELECTION, args);
-            android.util.Log.d(TAG, "ShotService: 收合全選（" + longest + " 字）ok=" + ok);
+            if (!ok) {
+                Rect b = new Rect();
+                target.getBoundsInScreen(b);
+                if (b.width() > 0 && b.height() > 0) collapseRect = b;
+            }
+            android.util.Log.d(TAG, "ShotService: 收合全選 ok=" + ok
+                    + (collapseRect == null ? "" : "，改請 PC 點 " + collapseRect));
         } catch (Throwable t) {
             android.util.Log.w(TAG, "ShotService: 收合全選失敗 " + t);
         }
     }
 
-    private static final class Best2 {
-        AccessibilityNodeInfo node;
-        int len;
-    }
-
-    private void findSelectable(AccessibilityNodeInfo n, Best2 best) {
-        if (n == null) return;
-        CharSequence t = n.getText();
-        if (t != null && t.length() > best.len
-                && n.getActionList() != null
-                && n.getActionList().contains(
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION)) {
-            best.node = n;
-            best.len = t.length();
-        }
-        for (int i = 0; i < n.getChildCount(); i++) {
-            findSelectable(n.getChild(i), best);
-        }
+    /**
+     * 指令 9：PC 問「要不要幫忙點一下收合全選、點哪裡」。
+     * 回 null ＝ 不用（已用無障礙收合，或這次沒有進選取模式）。
+     */
+    static int[] collapseHint() {
+        ShotService s = instance;
+        if (s == null || s.collapseRect == null) return null;
+        Rect b = s.collapseRect;
+        s.collapseRect = null;         // 只給一次，避免下次誤用舊座標
+        return new int[]{b.centerX(), b.centerY()};
     }
 
     /** 畫面上是否已經開著一個訊息選單（用必定存在的「複製」判斷）。 */
