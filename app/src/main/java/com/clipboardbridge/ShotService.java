@@ -105,47 +105,6 @@ public class ShotService extends AccessibilityService {
      * 只對 LINE 做：別的 App 要嘛本來就能拖曳選取，要嘛沒有這個選單。
      */
     private static final String PKG_LINE = "jp.naver.line.android";
-    /**
-     * 長按選單裡「進入文字選取模式」那一項的文字。
-     *
-     * 實機（2026-07-22、Tab S11+）叫「選擇並複製」——不是我原本猜的
-     * 「選取文字」。列成陣列是為了 LINE 改版或不同語系時多一層保險，
-     * 依序找，第一個找到的就點。
-     */
-    private static final String[] MENU_SELECT_TEXTS = {
-            "選擇並複製", "選取文字", "選擇文字", "Select text"};
-    /**
-     * 訊息選單裡必定存在的一項——用來判斷選單到底有沒有開（見 waitMenu）。
-     * 注意比對是「完全相等」，所以不會被「選擇並複製」誤中。
-     */
-    private static final String MENU_PROBE_TEXT = "複製";
-    private static final long MENU_POLL_MS = 120;      // 每隔多久找一次選單
-    /** 從長按算起等多久；PC 的長按要 0.4s 後才按下、再按住 0.8s，要留餘裕。 */
-    private static final long MENU_WAIT_MS = 3500;
-    /**
-     * 這麼早之前找到的選單一律不採信。
-     *
-     * PC 端要等 0.2 秒（閃開雙擊判定）才按下去，Android 的長按門檻又是 0.5
-     * 秒，所以最快也要 0.7 秒才可能有「這次的」選單。實測踩過：上一次流程
-     * 留在畫面上的舊選單會在 213ms 就被找到並點下去，於是**選到的是上一則
-     * 訊息**——使用者回報的「選錯訊息」就是這麼來的，跟座標完全無關。
-     *
-     * 這個值必須小於 PC 端的「等待＋按住」總和（見 tablet_text.py），否則
-     * 連這次自己按出來的選單都會被濾掉。真正防舊選單的是 windowId 黑名單，
-     * 這道只是保險，所以取得比 0.7 秒寬鬆。
-     */
-    private static final long MENU_MIN_WAIT_MS = 450;
-    private static final long MASK_LINGER_MS = 400;    // 點完選單再多蓋一下
-    /** 點完選單 → 選取畫面起來 → 收合「整則全選」的等待時間。 */
-    private static final long COLLAPSE_DELAY_MS = 600;
-    /**
-     * 遮罩的硬逾時。這條路上每一步都可能卡住（節點沒反應、選單不出來、
-     * 遮罩被系統強制隱藏），所以不用任何持久旗標判斷收尾——時間到就無條件
-     * 撤掉。ShotService 的 busy 曾經因為「遮罩畫不出來→兩條清除路徑都走不到」
-     * 而永久卡死整個框選功能，這裡不重蹈覆轍。
-     */
-    private static final long MASK_TIMEOUT_MS = 4600;
-
     /** 裁切完成後的回呼（PC 走控制指令進來時用來取回 PNG）。 */
     interface ShotCallback {
         /**
@@ -169,25 +128,6 @@ public class ShotService extends AccessibilityService {
     private volatile String topPkg = "";
     /** 是否正處於遠端桌面（用來做進出 RDP 的一次性切換，不是每個事件都做）。 */
     private boolean inRdp = false;
-    /** 取字流程進行中（與框選截圖的 busy 各自獨立，互不影響）。 */
-    private boolean picking = false;
-    /** 開場就已經在畫面上的舊選單的 windowId（-1＝沒有）。 */
-    private int staleMenuWindow = -1;
-    /** 早於這個時間點找到的選單一律不採信（見 MENU_MIN_WAIT_MS）。 */
-    private long menuNotBefore = 0;
-    /** 這次點的那則訊息的文字——用來在選取畫面裡認出同一則。 */
-    private volatile String pickText;
-    /** 需要 PC 幫忙點一下才收得掉全選時，要點的範圍（見 collapseSelection）。 */
-    private volatile Rect collapseRect;
-    private View mask;
-    private Bitmap maskShot;
-    /** 遮罩無條件收掉，不管流程走到哪一步。 */
-    private final Runnable maskTimeout = () -> {
-        if (picking) {
-            android.util.Log.w(TAG, "ShotService: 取字逾時，撤遮罩");
-            endPick();
-        }
-    };
     /** SELECT_TIMEOUT_MS 到了還沒收尾就當成取消，避免 busy 永久卡住。 */
     private final Runnable selectTimeout = () -> {
         if (busy.get()) {
@@ -219,8 +159,6 @@ public class ShotService extends AccessibilityService {
         // 否則那個視窗會一直掛在 WindowManager 上。
         main.removeCallbacks(selectTimeout);
         if (busy.get()) fail(null);
-        main.removeCallbacks(maskTimeout);
-        if (picking) endPick();
         super.onDestroy();
     }
 
@@ -264,8 +202,6 @@ public class ShotService extends AccessibilityService {
                     + " cls=" + event.getClassName()
                     + " 文字=「" + head + "」 len=" + (t == null ? 0 : t.length())
                     + " bounds=" + b);
-            // 附帶觀察：LINE 若有註冊自訂無障礙動作（例如就是「選擇並複製」），
-            // 未來可以一個 performAction 直接叫出它原生的選取畫面
             if (src != null && src.getActionList() != null) {
                 StringBuilder sb = new StringBuilder();
                 for (AccessibilityNodeInfo.AccessibilityAction a : src.getActionList()) {
@@ -274,8 +210,32 @@ public class ShotService extends AccessibilityService {
                 }
                 android.util.Log.d(TAG, "ShotService: 可用動作 = " + sb);
             }
+            // 探針：訊息泡泡本身吃不吃 ACTION_SET_SELECTION（0x20000 有列在動作
+            // 清單裡）。先前「LINE 不吃」的結論來自一次無效測試——那次是對
+            // **選取畫面**裡的節點做的，而且還抓錯節點；泡泡本身從沒試過。
+            // 若 (0,len) 有效且畫面真的顯示選取，代表也許能直接驅動 LINE 自己的
+            // 選取狀態、連自繪的選字層都不用。(0,0) 一起試是為了確認能不能指定
+            // 任意範圍（能的話「整則全選」就不必事後收合，一開始就設對即可）。
+            if (src != null && t != null && t.length() > 0) {
+                android.util.Log.d(TAG, "ShotService: SET_SELECTION(0," + t.length()
+                        + ")=" + setSel(src, 0, t.length())
+                        + " (0,0)=" + setSel(src, 0, 0)
+                        + " (0,3)=" + setSel(src, 0, Math.min(3, t.length())));
+            }
         } catch (Throwable t) {
             android.util.Log.w(TAG, "ShotService: 點擊事件處理失敗 " + t);
+        }
+    }
+
+    /** 對節點設定文字選取範圍；回傳系統是否接受。 */
+    private static boolean setSel(AccessibilityNodeInfo n, int start, int end) {
+        try {
+            android.os.Bundle args = new android.os.Bundle();
+            args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start);
+            args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end);
+            return n.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args);
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -444,30 +404,10 @@ public class ShotService extends AccessibilityService {
 
     // ── 游標下取字 ──────────────────────────────────────
     /**
-     * 指令 7：把 (x,y) 那則訊息帶進 LINE 的「選取文字」畫面。
-     *
-     * PC 端在平板模式收到左鍵點擊就送這個（座標＝Sync 推算的平板游標位置）。
-     * 回傳「有沒有開始」——沒有文字節點、前景不是 LINE 都直接回 false 且
-     * 什麼都不做，所以點圖片、貼圖、空白處完全沒有副作用。
-     */
-    static boolean selectText(final int x, final int y, final boolean useMask) {
-        final ShotService s = instance;
-        if (s == null) return false;
-        final boolean[] r = new boolean[1];
-        final CountDownLatch latch = new CountDownLatch(1);
-        s.main.post(() -> {
-            try { r[0] = s.startPick(x, y, useMask); }
-            finally { latch.countDown(); }
-        });
-        try { latch.await(2, TimeUnit.SECONDS); } catch (InterruptedException ignore) { }
-        return r[0];
-    }
-
-    /**
      * 指令 8：直接把 (x,y) 那則訊息的整段文字寫進平板剪貼簿。
      *
      * 不碰 UI、不依賴選單文字，任何 App 都通；PC 端靠既有的 clipagent
-     * CLIPTEXT 回拉，不必另接管道。要只取一段時才用指令 7。
+     * CLIPTEXT 回拉，不必另接管道。要只取一段時用點擊 → 選字覆蓋層那條路。
      */
     static boolean copyText(final int x, final int y) {
         final ShotService s = instance;
@@ -497,276 +437,6 @@ public class ShotService extends AccessibilityService {
         return r[0];
     }
 
-    /** 主執行緒；回傳是否真的開始了一場取字。 */
-    private boolean startPick(int x, int y, boolean useMask) {
-        if (picking) return false;
-        String pkg = currentPkg();
-        if (!PKG_LINE.equals(pkg)) return false;
-        // 先看游標下有沒有文字，有才動作 —— 圖片/貼圖只有 contentDescription
-        // 沒有 getText()，於是連長按都不會發生，也就不會冒出選單閃一下。
-        final AccessibilityNodeInfo node = findTextNodeAt(x, y);
-        if (node == null) return false;
-        pickText = node.getText() == null ? null : node.getText().toString().trim();
-        collapseRect = null;
-        picking = true;
-        main.removeCallbacks(maskTimeout);
-        main.postDelayed(maskTimeout, MASK_TIMEOUT_MS);
-        if (useMask && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // 蓋上凍結畫面，把長按漣漪和選單整個藏起來，使用者只看到
-            // 「畫面靜止一下 → 直接進入選取模式」
-            takeScreenshot(Display.DEFAULT_DISPLAY,
-                    Executors.newSingleThreadExecutor(),
-                    new TakeScreenshotCallback() {
-                        @Override
-                        public void onSuccess(ScreenshotResult res) {
-                            Bitmap bmp = null;
-                            try (HardwareBuffer hb = res.getHardwareBuffer()) {
-                                Bitmap raw = Bitmap.wrapHardwareBuffer(hb, res.getColorSpace());
-                                if (raw != null) {
-                                    bmp = raw.copy(Bitmap.Config.ARGB_8888, false);
-                                    raw.recycle();
-                                }
-                            } catch (Exception e) {
-                                android.util.Log.w(TAG, "ShotService: 遮罩截圖失敗 " + e);
-                            }
-                            final Bitmap b = bmp;
-                            main.post(() -> {
-                                if (picking) {
-                                    if (b != null) showMask(b);
-                                    longPress(node, x, y);
-                                }
-                            });
-                        }
-
-                        @Override
-                        public void onFailure(int errorCode) {
-                            // 截不到就不遮，功能照做（頂多看到選單閃一下）
-                            android.util.Log.w(TAG, "ShotService: 遮罩截圖失敗 " + errorCode);
-                            main.post(() -> { if (picking) longPress(node, x, y); });
-                        }
-                    });
-        } else {
-            longPress(node, x, y);
-        }
-        return true;
-    }
-
-    /**
-     * 清場並開始等選單。
-     *
-     * ⚠️ **這裡不做 ACTION_LONG_CLICK**。真正叫出選單的是 PC 端用 UHID 在
-     * 真實游標位置送的實體長按（見 tablet_text._long_press）。曾經在這裡也
-     * 補一次 ACTION_LONG_CLICK「反正成本是零」，實測是有害的：它按的是
-     * **閘門找到的節點**，而閘門是用有誤差的推算座標找的、可能是隔壁那則
-     * → 先彈出一個錯的選單，PC 的長按再彈一個對的（使用者看到「選單閃兩
-     * 下」），而輪詢可能先抓到錯的那個。座標的事交給真實游標，這裡只等。
-     *
-     * 也曾有 dispatchGesture 後備，已移除：無障礙服務要宣告
-     * canPerformGestures 才能派送手勢，ShotService 的 capabilities 沒有它，
-     * 是靜默失效；而改宣告會讓系統停用服務、要手動重開無障礙。
-     */
-    private void longPress(AccessibilityNodeInfo node, int x, int y) {
-        // 畫面上若還留著上一次的選單，先收掉：不然接下來的輪詢會立刻找到
-        // 它並點下去，選到的是**上一則**訊息。同時記下它的 windowId 當黑
-        // 名單，萬一 BACK 沒收掉也不會誤採。
-        staleMenuWindow = -1;
-        AccessibilityNodeInfo old = findAnyMenu();
-        if (old != null) {
-            staleMenuWindow = old.getWindowId();
-            android.util.Log.d(TAG, "ShotService: 畫面上有舊選單(win="
-                    + staleMenuWindow + ")，先收掉");
-            performGlobalAction(GLOBAL_ACTION_BACK);
-        }
-        android.util.Log.d(TAG, "ShotService: 等 PC 長按 (" + x + "," + y + ")");
-        // 用真實時間當截止點，不要用「輪詢次數 × 間隔」估——每輪要掃所有
-        // 視窗，實測誤差達 25%，估出來的逾時會晚於遮罩的硬逾時，導致收尾
-        // 的判斷根本沒機會執行（日誌上看起來像默默消失）。
-        final long now = android.os.SystemClock.uptimeMillis();
-        final long deadline = now + MENU_WAIT_MS;
-        menuNotBefore = now + MENU_MIN_WAIT_MS;
-        main.postDelayed(() -> waitMenu(deadline), MENU_POLL_MS);
-    }
-
-    /**
-     * 等長按選單出現 → 點「選擇並複製」。等的是 PC 那邊 UHID 實體長按的結果。
-     *
-     * 放棄時要不要送 BACK 收掉選單，用「選單裡有沒有『複製』」判斷：那一項
-     * 在 LINE 的訊息選單裡必定存在，看得到它就表示選單確實開著、BACK 只會
-     * 關掉選單；看不到就什麼都別做——沒有選單時送 BACK 會直接退出聊天室。
-     * （原本想用 getWindows() 數視窗，但本服務沒宣告
-     * flagRetrieveInteractiveWindows，它實際回空陣列。）
-     */
-    private void waitMenu(long deadline) {
-        if (!picking) return;
-        AccessibilityNodeInfo item = null;
-        // 太早找到的、或 windowId 與開場那個舊選單相同的，都不是這次的
-        if (android.os.SystemClock.uptimeMillis() >= menuNotBefore) {
-            for (String s : MENU_SELECT_TEXTS) {
-                AccessibilityNodeInfo n = findByText(s);
-                if (n != null && n.getWindowId() != staleMenuWindow) {
-                    item = n;
-                    break;
-                }
-            }
-        }
-        if (item != null) {
-            AccessibilityNodeInfo c = item;
-            try {
-                while (c != null && !c.isClickable()) c = c.getParent();
-            } catch (Throwable ignore) { c = null; }
-            CharSequence label = item.getText() != null
-                    ? item.getText() : item.getContentDescription();
-            boolean ok = (c != null ? c : item)
-                    .performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            android.util.Log.d(TAG, "ShotService: 點「" + label + "」ok=" + ok);
-            main.postDelayed(this::collapseSelection, COLLAPSE_DELAY_MS);
-            main.postDelayed(this::endPick, MASK_LINGER_MS);
-            return;
-        }
-        if (android.os.SystemClock.uptimeMillis() >= deadline) {
-            if (findByText(MENU_PROBE_TEXT) != null) {
-                android.util.Log.d(TAG, "ShotService: 選單有開但沒有「"
-                        + MENU_SELECT_TEXTS[0] + "」，收掉");
-                performGlobalAction(GLOBAL_ACTION_BACK);
-            } else {
-                android.util.Log.d(TAG, "ShotService: 長按沒有叫出任何選單，放棄");
-            }
-            main.postDelayed(this::endPick, MASK_LINGER_MS);
-            return;
-        }
-        main.postDelayed(() -> waitMenu(deadline), MENU_POLL_MS);
-    }
-
-    /**
-     * 目前畫面上可見的、文字（或無障礙描述）等於 text 的節點。
-     *
-     * **一定要掃所有視窗**，不能只看 getRootInActiveWindow()：LINE 的訊息
-     * 長按選單是獨立的 PopupWindow、不搶輸入焦點，所以「有焦點的視窗」永遠
-     * 是聊天室本身，選單整棵樹都在外面（2026-07-22 實測：連必定存在的
-     * 「複製」都找不到，於是每次都走到「長按沒有叫出任何選單」）。
-     */
-    private AccessibilityNodeInfo findByText(String text) {
-        for (AccessibilityNodeInfo root : roots()) {
-            AccessibilityNodeInfo n = findByTextIn(root, text);
-            if (n != null) return n;
-        }
-        return null;
-    }
-
-    /**
-     * 解除 LINE 選取模式預設的「整則全選」，讓滑鼠可以直接拖曳框選。
-     *
-     * 兩條路，依序試：
-     *  1. 無障礙 ACTION_SET_SELECTION(0,0) 把選取收合成插入點。實測 LINE 的
-     *     選取畫面**不吃**（ok=false），但別的 App／別的版本可能可以，成本
-     *     是零就留著。
-     *  2. 記下該文字節點的中心座標，交給 PC 用 UHID 在那裡點一下——實測那
-     *     是唯一收得掉的方法（使用者手動驗證過）。座標由這裡提供是必要的：
-     *     選取畫面每次出現的位置都不一樣，PC 猜不到。
-     *
-     * ❌ 不能用注入方向鍵：LINE 的訊息是不可編輯的 TextView，方向鍵不會收合
-     * 選取，反而會把焦點移到左邊的聊天室清單去（使用者實測）。
-     *
-     * 目標節點＝文字與這次點的那則**完全相同**的那個。早期版本取「畫面上
-     * 文字最長且支援 SET_SELECTION 的節點」，實測會抓到 235 字的無關節點。
-     */
-    private void collapseSelection() {
-        collapseRect = null;
-        try {
-            if (pickText == null || pickText.isEmpty()) return;
-            AccessibilityNodeInfo target = null;
-            for (AccessibilityNodeInfo root : roots()) {
-                AccessibilityNodeInfo n = findByTextIn(root, pickText);
-                if (n != null) {
-                    target = n;
-                    // 聊天室裡那個原始節點也會命中，但選取畫面的那個在別的
-                    // 視窗；兩個都可以當點擊目標，取最後找到的即可
-                }
-            }
-            if (target == null) {
-                android.util.Log.d(TAG, "ShotService: 找不到要收合的文字節點");
-                return;
-            }
-            android.os.Bundle args = new android.os.Bundle();
-            args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0);
-            args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 0);
-            boolean ok = target.performAction(
-                    AccessibilityNodeInfo.ACTION_SET_SELECTION, args);
-            if (!ok) {
-                Rect b = new Rect();
-                target.getBoundsInScreen(b);
-                if (b.width() > 0 && b.height() > 0) collapseRect = b;
-            }
-            android.util.Log.d(TAG, "ShotService: 收合全選 ok=" + ok
-                    + (collapseRect == null ? "" : "，改請 PC 點 " + collapseRect));
-        } catch (Throwable t) {
-            android.util.Log.w(TAG, "ShotService: 收合全選失敗 " + t);
-        }
-    }
-
-    /**
-     * 指令 9：PC 問「要不要幫忙點一下收合全選、點哪裡」。
-     * 回 null ＝ 不用（已用無障礙收合，或這次沒有進選取模式）。
-     */
-    static int[] collapseHint() {
-        ShotService s = instance;
-        if (s == null || s.collapseRect == null) return null;
-        Rect b = s.collapseRect;
-        s.collapseRect = null;         // 只給一次，避免下次誤用舊座標
-        return new int[]{b.centerX(), b.centerY()};
-    }
-
-    /** 畫面上是否已經開著一個訊息選單（用必定存在的「複製」判斷）。 */
-    private AccessibilityNodeInfo findAnyMenu() {
-        return findByText(MENU_PROBE_TEXT);
-    }
-
-    /** 所有視窗的根節點（含有焦點的那個）。 */
-    private List<AccessibilityNodeInfo> roots() {
-        List<AccessibilityNodeInfo> out = new java.util.ArrayList<>();
-        try {
-            AccessibilityNodeInfo active = getRootInActiveWindow();
-            if (active != null) out.add(active);
-            List<android.view.accessibility.AccessibilityWindowInfo> ws = getWindows();
-            if (ws != null) {
-                for (android.view.accessibility.AccessibilityWindowInfo w : ws) {
-                    if (w == null) continue;
-                    AccessibilityNodeInfo r = w.getRoot();
-                    if (r != null) out.add(r);
-                }
-            }
-        } catch (Throwable t) {
-            android.util.Log.w(TAG, "ShotService: 列視窗失敗 " + t);
-        }
-        return out;
-    }
-
-    private AccessibilityNodeInfo findByTextIn(AccessibilityNodeInfo root, String text) {
-        try {
-            if (root == null) return null;
-            List<AccessibilityNodeInfo> found =
-                    root.findAccessibilityNodeInfosByText(text);
-            if (found == null) return null;
-            for (AccessibilityNodeInfo n : found) {
-                // findAccessibilityNodeInfosByText 是「包含」比對，這裡要求
-                // 完全相等：否則聊天室裡剛好有一則訊息寫著「選擇並複製」就
-                // 會被當成選單項點下去。文字或 contentDescription 都算——
-                // 選單項是圖示配文字，不同版本擺放位置不一定相同。
-                if (n == null || !n.isVisibleToUser()) continue;
-                if (text.equals(trimmed(n.getText()))
-                        || text.equals(trimmed(n.getContentDescription()))) {
-                    return n;
-                }
-            }
-        } catch (Throwable t) {
-            android.util.Log.w(TAG, "ShotService: 找節點「" + text + "」失敗 " + t);
-        }
-        return null;
-    }
-
-    private static String trimmed(CharSequence cs) {
-        return cs == null ? null : cs.toString().trim();
-    }
 
     /**
      * (x,y) 命中的最深、且**有 getText()** 的節點；精準命中不到就找附近最近的。
@@ -840,55 +510,6 @@ public class ShotService extends AccessibilityService {
         }
         CharSequence t = n.getText();
         return (t != null && !t.toString().trim().isEmpty()) ? n : null;
-    }
-
-    // ── 取字用的凍結畫面遮罩 ────────────────────────────
-    private void showMask(Bitmap bmp) {
-        removeMask();
-        maskShot = bmp;
-        try {
-            View v = new View(this) {
-                @Override
-                protected void onDraw(Canvas canvas) {
-                    if (maskShot != null) canvas.drawBitmap(maskShot, 0, 0, null);
-                }
-            };
-            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    // 一定要 NOT_TOUCHABLE：長按是 PC 用 UHID 送的真實滑鼠
-                    // 事件，遮罩若可觸控就會把那一按整個吃掉，選單永遠不會
-                    // 出現（2026-07-22 第一次實測就是死在這裡）。遮罩純粹
-                    // 是視覺上的，不參與輸入。
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.OPAQUE);
-            wm.addView(v, lp);
-            mask = v;
-        } catch (Exception e) {
-            android.util.Log.e(TAG, "ShotService: 遮罩顯示失敗 " + e);
-            maskShot = null;
-        }
-    }
-
-    private void removeMask() {
-        if (mask != null) {
-            try { wm.removeView(mask); } catch (Exception ignore) { }
-            mask = null;
-        }
-        if (maskShot != null) {
-            maskShot.recycle();
-            maskShot = null;
-        }
-    }
-
-    private void endPick() {
-        main.removeCallbacks(maskTimeout);
-        removeMask();
-        picking = false;
     }
 
     // ── 截圖 → 遮罩 ─────────────────────────────────────
