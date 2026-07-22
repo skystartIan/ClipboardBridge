@@ -230,9 +230,14 @@ public class ShotService extends AccessibilityService {
             Rect b = new Rect();
             if (src != null) src.getBoundsInScreen(b);
             android.util.Log.d(TAG, "ShotService: 點擊事件 pkg=" + pkg
-                    + " cls=" + event.getClassName()
+                    + " id=" + (src == null ? null : src.getViewIdResourceName())
                     + " 文字=「" + head + "」 len=" + (t == null ? 0 : t.length())
                     + " bounds=" + b);
+            // 只對「可點擊**且**可長按」的文字節點動作。訊息泡泡兩者皆是（App 為它
+            // 提供了長按選單），而一般按鈕通常只有 clickable——這樣點到按鈕、連結、
+            // 聊天室清單時不會冒出選字層。用這個通用條件而不是比對 LINE 的
+            // resource-id（chat_ui_message_text），免得 LINE 改版就失效。
+            if (src == null || !src.isLongClickable()) return;
             if (t == null || t.toString().trim().isEmpty()) return;
             if (!armed()) {
                 android.util.Log.d(TAG, "ShotService: 未啟用（沒有滑鼠也沒被 PC arm），略過");
