@@ -10,19 +10,26 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.graphics.drawable.GradientDrawable;
 import android.hardware.HardwareBuffer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.StaticLayout;
+import android.text.TextPaint;
+import android.util.TypedValue;
 import android.view.Display;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.RequiresApi;
@@ -96,15 +103,29 @@ public class ShotService extends AccessibilityService {
      */
     private static final long SELECT_TIMEOUT_MS = 45_000;
 
-    // ── 游標下取字（LINE 訊息複製）──────────────────────
+    // ── 點一下訊息 → 文字原地變成可選取 ────────────────
     /**
-     * LINE 的訊息泡泡是唯讀 TextView（沒有 textIsSelectable），滑鼠拖不出
-     * 選取範圍，只能長按叫出選單再點「選取文字」。指令 7 就是把這兩步自動
-     * 化，讓使用者一點訊息就直接落在選取畫面裡，接著自己拉範圍按 Ctrl+C。
+     * LINE 的訊息泡泡是唯讀 TextView（沒有 textIsSelectable），滑鼠拖不出選取範圍。
      *
-     * 只對 LINE 做：別的 App 要嘛本來就能拖曳選取，要嘛沒有這個選單。
+     * 走過的死路（都有實機證據，別再試）：
+     *  - 模擬長按叫出 LINE 的選單再點「選擇並複製」：PC 用 UHID 補送的按下會撞上
+     *    雙擊判定窗、遮罩、touch slop，一路跟 Android 的手勢辨識器打架。
+     *  - 對泡泡下 ACTION_SET_SELECTION：**回 true 但畫面完全沒有選取**（2026-07-23
+     *    截圖確認）。那個 TextView 沒有 textIsSelectable 所以不渲染、沒有控制點，
+     *    動作清單裡也沒有 ACTION_COPY，等於選了也拿不到。
+     *
+     * 現在的做法：使用者的真實點擊會發出 TYPE_VIEW_CLICKED，事件 source 就是被點的
+     * 那個節點，文字與精確 bounds 都拿得到（座標推算完全不需要）。於是**在原地疊一層
+     * 內容相同、真正可選取的 TextView**，讓使用者直接拖曳框選、按 Ctrl+C。
+     * 沒有選單、不依賴 LINE 的版本或選單文字，任何 App 都適用。
      */
     private static final String PKG_LINE = "jp.naver.line.android";
+    /** 選字層的保險逾時：不管使用者做了什麼，時間到就撤掉，不留殘留視窗。 */
+    private static final long PICK_TIMEOUT_MS = 60_000;
+    /** 等截圖取樣配色的上限；超過就先用上次的配色把選字層開出來，別讓使用者等。 */
+    private static final long SAMPLE_WAIT_MS = 450;
+    /** 選字層比原本的泡泡往外擴這麼多，讓斷行不同時也放得下。 */
+    private static final int PICK_PAD_PX = 18;
     /** 裁切完成後的回呼（PC 走控制指令進來時用來取回 PNG）。 */
     interface ShotCallback {
         /**
@@ -128,6 +149,15 @@ public class ShotService extends AccessibilityService {
     private volatile String topPkg = "";
     /** 是否正處於遠端桌面（用來做進出 RDP 的一次性切換，不是每個事件都做）。 */
     private boolean inRdp = false;
+
+    // 選字層狀態
+    private View pickRoot;
+    private TextView pickView;
+    /** PC 跨屏進平板時 arm，帶 TTL；PC 崩潰或斷線時平板會自己解除。 */
+    private volatile long armedUntil = 0;
+    /** 上次取樣到的泡泡配色，截圖來不及時沿用（第一次才會用中性配色）。 */
+    private int lastBg = 0xFF303030, lastFg = 0xFFFFFFFF;
+    private final Runnable pickTimeout = this::hidePick;
     /** SELECT_TIMEOUT_MS 到了還沒收尾就當成取消，避免 busy 永久卡住。 */
     private final Runnable selectTimeout = () -> {
         if (busy.get()) {
@@ -159,6 +189,7 @@ public class ShotService extends AccessibilityService {
         // 否則那個視窗會一直掛在 WindowManager 上。
         main.removeCallbacks(selectTimeout);
         if (busy.get()) fail(null);
+        hidePick();
         super.onDestroy();
     }
 
@@ -202,41 +233,251 @@ public class ShotService extends AccessibilityService {
                     + " cls=" + event.getClassName()
                     + " 文字=「" + head + "」 len=" + (t == null ? 0 : t.length())
                     + " bounds=" + b);
-            if (src != null && src.getActionList() != null) {
-                StringBuilder sb = new StringBuilder();
-                for (AccessibilityNodeInfo.AccessibilityAction a : src.getActionList()) {
-                    sb.append(a.getLabel() == null
-                            ? Integer.toHexString(a.getId()) : a.getLabel()).append(' ');
-                }
-                android.util.Log.d(TAG, "ShotService: 可用動作 = " + sb);
+            if (t == null || t.toString().trim().isEmpty()) return;
+            if (!armed()) {
+                android.util.Log.d(TAG, "ShotService: 未啟用（沒有滑鼠也沒被 PC arm），略過");
+                return;
             }
-            // 探針：訊息泡泡本身吃不吃 ACTION_SET_SELECTION（0x20000 有列在動作
-            // 清單裡）。先前「LINE 不吃」的結論來自一次無效測試——那次是對
-            // **選取畫面**裡的節點做的，而且還抓錯節點；泡泡本身從沒試過。
-            // 若 (0,len) 有效且畫面真的顯示選取，代表也許能直接驅動 LINE 自己的
-            // 選取狀態、連自繪的選字層都不用。(0,0) 一起試是為了確認能不能指定
-            // 任意範圍（能的話「整則全選」就不必事後收合，一開始就設對即可）。
-            if (src != null && t != null && t.length() > 0) {
-                android.util.Log.d(TAG, "ShotService: SET_SELECTION(0," + t.length()
-                        + ")=" + setSel(src, 0, t.length())
-                        + " (0,0)=" + setSel(src, 0, 0)
-                        + " (0,3)=" + setSel(src, 0, Math.min(3, t.length())));
-            }
+            showPick(t.toString(), b);
         } catch (Throwable t) {
             android.util.Log.w(TAG, "ShotService: 點擊事件處理失敗 " + t);
         }
     }
 
-    /** 對節點設定文字選取範圍；回傳系統是否接受。 */
-    private static boolean setSel(AccessibilityNodeInfo n, int start, int end) {
+    /**
+     * 現在該不該接手點擊。
+     *
+     * 要擋的是「手指點訊息也跳出選字層」，要放行的是任何滑鼠操作——包含 PC 關機、
+     * 平板直連藍牙滑鼠的情境。TYPE_VIEW_CLICKED 不帶輸入來源，所以取兩個訊號的聯集：
+     *  1. PC 跨屏進來時送過 arm（控制指令 10，帶 TTL）。
+     *  2. 平板上接著真的指向裝置：列舉 InputDevice 找 SOURCE_MOUSE。
+     *     Sync 自己的 UHID 虛擬滑鼠叫 "SyncMouse"，用名字排除掉。
+     */
+    private boolean armed() {
+        if (android.os.SystemClock.uptimeMillis() < armedUntil) return true;
         try {
-            android.os.Bundle args = new android.os.Bundle();
-            args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start);
-            args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end);
-            return n.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args);
+            for (int id : InputDevice.getDeviceIds()) {
+                InputDevice dev = InputDevice.getDevice(id);
+                if (dev == null || dev.isVirtual()) continue;
+                if (!dev.supportsSource(InputDevice.SOURCE_MOUSE)) continue;
+                String name = dev.getName() == null ? "" : dev.getName();
+                if (name.startsWith("Sync")) continue;      // 我們自己的 UHID 滑鼠
+                return true;
+            }
         } catch (Throwable t) {
-            return false;
+            android.util.Log.w(TAG, "ShotService: 列舉輸入裝置失敗 " + t);
         }
+        return false;
+    }
+
+    /** 控制指令 10：PC 跨屏進平板 arm、離開 disarm。 */
+    static void setArm(boolean on, long ttlMs) {
+        ShotService s = instance;
+        if (s == null) return;
+        s.armedUntil = on ? android.os.SystemClock.uptimeMillis() + ttlMs : 0;
+        android.util.Log.d(TAG, "ShotService: arm=" + on);
+        if (!on) s.main.post(s::hidePick);
+    }
+
+    // ── 選字層 ──────────────────────────────────────────
+    /**
+     * 在原本的泡泡位置疊一層內容相同、真正可選取的 TextView。
+     *
+     * 配色從截圖取樣（無障礙節點拿不到顏色字級），讓它看起來就像原本那則訊息變成
+     * 可以選取的；截圖來不及就沿用上次的配色，不讓使用者等。
+     */
+    private void showPick(String text, Rect bounds) {
+        main.post(() -> {
+            final boolean[] done = new boolean[1];
+            Runnable openWithLast = () -> {
+                if (!done[0]) {
+                    done[0] = true;
+                    openPick(text, bounds, lastBg, lastFg);
+                }
+            };
+            main.postDelayed(openWithLast, SAMPLE_WAIT_MS);
+            try {
+                takeScreenshot(Display.DEFAULT_DISPLAY, Executors.newSingleThreadExecutor(),
+                        new TakeScreenshotCallback() {
+                            @Override
+                            public void onSuccess(ScreenshotResult res) {
+                                int[] c = null;
+                                try (HardwareBuffer hb = res.getHardwareBuffer()) {
+                                    Bitmap raw = Bitmap.wrapHardwareBuffer(hb, res.getColorSpace());
+                                    if (raw != null) {
+                                        Bitmap soft = raw.copy(Bitmap.Config.ARGB_8888, false);
+                                        raw.recycle();
+                                        if (soft != null) {
+                                            c = sampleColors(soft, bounds);
+                                            soft.recycle();
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    android.util.Log.w(TAG, "ShotService: 取樣配色失敗 " + e);
+                                }
+                                final int[] cc = c;
+                                main.post(() -> {
+                                    if (cc != null) { lastBg = cc[0]; lastFg = cc[1]; }
+                                    if (!done[0]) {
+                                        done[0] = true;
+                                        main.removeCallbacks(openWithLast);
+                                        openPick(text, bounds, lastBg, lastFg);
+                                    }
+                                });
+                            }
+
+                            @Override
+                            public void onFailure(int errorCode) {
+                                main.post(openWithLast);
+                            }
+                        });
+            } catch (Throwable t) {
+                main.post(openWithLast);
+            }
+        });
+    }
+
+    /**
+     * 取樣泡泡的底色與文字色。
+     *
+     * 底色取靠近左右內緣、垂直中線的幾個點的中位數（那裡幾乎不會壓到字）；文字色
+     * 取整塊裡亮度離底色最遠的那個像素——就是筆畫。
+     */
+    private static int[] sampleColors(Bitmap bmp, Rect b) {
+        Rect r = new Rect(b);
+        if (!r.intersect(0, 0, bmp.getWidth(), bmp.getHeight())) return null;
+        int y = r.centerY();
+        java.util.List<Integer> edge = new java.util.ArrayList<>();
+        for (int dx = 2; dx <= 10; dx += 2) {
+            edge.add(bmp.getPixel(Math.min(bmp.getWidth() - 1, r.left + dx), y));
+            edge.add(bmp.getPixel(Math.max(0, r.right - dx), y));
+        }
+        java.util.Collections.sort(edge);
+        int bg = edge.get(edge.size() / 2);
+        int fg = 0, best = -1;
+        int step = Math.max(1, r.width() / 60);
+        for (int x = r.left; x < r.right; x += step) {
+            for (int yy = r.top + 2; yy < r.bottom - 2; yy += Math.max(1, r.height() / 8)) {
+                int p = bmp.getPixel(Math.min(bmp.getWidth() - 1, x),
+                        Math.min(bmp.getHeight() - 1, yy));
+                int d = Math.abs(lum(p) - lum(bg));
+                if (d > best) { best = d; fg = p; }
+            }
+        }
+        if (best < 40) fg = lum(bg) > 128 ? 0xFF000000 : 0xFFFFFFFF;
+        return new int[]{bg | 0xFF000000, fg | 0xFF000000};
+    }
+
+    private static int lum(int c) {
+        return (Color.red(c) * 30 + Color.green(c) * 59 + Color.blue(c) * 11) / 100;
+    }
+
+    private void openPick(String text, Rect bounds, int bg, int fg) {
+        hidePick();
+        try {
+            int pad = PICK_PAD_PX;
+            int w = Math.max(160, bounds.width() + pad * 2);
+            float size = fitTextSize(text, bounds.width(), bounds.height());
+
+            TextView tv = new TextView(this);
+            tv.setText(text);
+            tv.setTextIsSelectable(true);
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, size);
+            tv.setTextColor(fg);
+            tv.setPadding(pad, pad, pad, pad);
+            GradientDrawable shape = new GradientDrawable();
+            shape.setColor(bg);
+            shape.setCornerRadius(Math.min(48f, bounds.height() * 0.5f));
+            tv.setBackground(shape);
+
+            FrameLayout root = new FrameLayout(this) {
+                @Override
+                public boolean onTouchEvent(MotionEvent e) {
+                    // 點到文字以外的地方＝收工（TextView 會自己吃掉它範圍內的觸控）
+                    if (e.getActionMasked() == MotionEvent.ACTION_DOWN) hidePick();
+                    return true;
+                }
+
+                @Override
+                public boolean dispatchKeyEvent(KeyEvent e) {
+                    if (e.getAction() == KeyEvent.ACTION_DOWN
+                            && (e.getKeyCode() == KeyEvent.KEYCODE_ESCAPE
+                            || e.getKeyCode() == KeyEvent.KEYCODE_BACK)) {
+                        hidePick();
+                        return true;
+                    }
+                    return super.dispatchKeyEvent(e);
+                }
+            };
+            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
+                    w, FrameLayout.LayoutParams.WRAP_CONTENT);
+            flp.leftMargin = Math.max(0, bounds.left - pad);
+            flp.topMargin = Math.max(0, bounds.top - pad);
+            root.addView(tv, flp);
+
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            wm.addView(root, lp);
+            pickRoot = root;
+            pickView = tv;
+            main.removeCallbacks(pickTimeout);
+            main.postDelayed(pickTimeout, PICK_TIMEOUT_MS);
+            android.util.Log.d(TAG, "ShotService: 選字層開啟 " + text.length()
+                    + " 字 size=" + (int) size + " bg=" + Integer.toHexString(bg));
+        } catch (Throwable t) {
+            android.util.Log.e(TAG, "ShotService: 選字層開啟失敗 " + t);
+            pickRoot = null;
+            pickView = null;
+        }
+    }
+
+    /** 找一個讓整段文字大致填滿原本泡泡的字級。 */
+    private static float fitTextSize(String text, int w, int h) {
+        TextPaint p = new TextPaint();
+        p.setAntiAlias(true);
+        for (float s = Math.min(96, Math.max(24, h)); s >= 18; s -= 1f) {
+            p.setTextSize(s);
+            StaticLayout sl = StaticLayout.Builder
+                    .obtain(text, 0, text.length(), p, Math.max(1, w)).build();
+            if (sl.getHeight() <= h) return s;
+        }
+        return 18f;
+    }
+
+    private void hidePick() {
+        main.removeCallbacks(pickTimeout);
+        if (pickRoot != null) {
+            try { wm.removeView(pickRoot); } catch (Exception ignore) { }
+            pickRoot = null;
+        }
+        pickView = null;
+    }
+
+    /** Ctrl+C：把選字層裡選取的片段寫進剪貼簿（沒選就整段）。 */
+    private boolean copyPickSelection() {
+        TextView tv = pickView;
+        if (tv == null) return false;
+        try {
+            CharSequence all = tv.getText();
+            int a = tv.getSelectionStart(), b = tv.getSelectionEnd();
+            if (a > b) { int tmp = a; a = b; b = tmp; }
+            CharSequence out = (a >= 0 && b > a) ? all.subSequence(a, b) : all;
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("text", out));
+            android.util.Log.d(TAG, "ShotService: 選字複製 " + out.length() + " 字"
+                    + (b > a ? "（選取範圍）" : "（未選取＝整段）"));
+            Toast.makeText(this, "✓ 已複製 " + out.length() + " 字",
+                    Toast.LENGTH_SHORT).show();
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "ShotService: 選字複製失敗 " + t);
+        }
+        hidePick();
+        return true;
     }
 
     /**
@@ -325,6 +566,13 @@ public class ShotService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
+        // 選字層開著時，Ctrl+C 是要複製選取範圍的，不能讓它傳下去給 App。
+        // 只在選字層存在時攔——其餘情況（實體鍵盤、Sync 轉發）Ctrl+C 照常送達平板。
+        if (pickView != null && event.getKeyCode() == KeyEvent.KEYCODE_C
+                && event.isCtrlPressed()) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) copyPickSelection();
+            return true;
+        }
         // 只吃 F1 與 Ctrl+Space；其餘一律放行，別影響正常打字
         if (event.getKeyCode() == KeyEvent.KEYCODE_F1) {
             String pkg = currentPkg();

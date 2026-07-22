@@ -49,6 +49,13 @@ class ImageServer {
      * 改成由平板端自己接住使用者的真實點擊（TYPE_VIEW_CLICKED）處理。
      */
     private static final int CTRL_COPY_TEXT = 8;
+    /**
+     * 10 = PC 跨屏進平板 arm／離開 disarm，額外帶 [1B on/off]。
+     * 選字層只在「有滑鼠在操作」時才接手點擊，避免手指點訊息也跳出來。arm 帶 TTL，
+     * PC 崩潰或斷線時平板會自己解除；平板直連藍牙滑鼠時不必 PC 參與（見 ShotService.armed）。
+     */
+    private static final int CTRL_ARM_PICK = 10;
+    private static final long ARM_TTL_MS = 10 * 60 * 1000L;
     private static final int SHOT_TIMEOUT_S = 120;   // 使用者慢慢框，別急著斷線
     /** 框選截圖的失敗回傳碼（負數，與正常的 PNG 長度不會混淆）。 */
     private static final int SHOT_NO_SVC = -1;       // 無障礙服務沒開
@@ -166,6 +173,15 @@ class ImageServer {
                         dos.writeInt(r.cancelled ? 0 : SHOT_FAILED);
                     }
                     dos.flush();
+                    return;
+                }
+                if (cmd == CTRL_ARM_PICK) {
+                    boolean on = in.read() == 1;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        ShotService.setArm(on, ARM_TTL_MS);
+                    }
+                    out.write(1);
+                    out.flush();
                     return;
                 }
                 if (cmd == CTRL_COPY_TEXT) {
