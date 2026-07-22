@@ -283,6 +283,41 @@ public class ShotService extends AccessibilityService {
         return false;
     }
 
+    /**
+     * 控制指令 11：對游標下（座標由 PC 給）的訊息開選字層。
+     *
+     * 給「點下去會被吃掉」的訊息用——純連結或純數字的訊息由 LinkMovementMethod
+     * 接管觸控，`performClick()` 不會被呼叫，於是 TYPE_VIEW_CLICKED 根本不會發出，
+     * 點擊觸發在原理上就沒有機會（實測：點泡泡最右內緣照樣開瀏覽器、零事件）。
+     *
+     * 這條路用的是 PC 推算的座標（誤差數十像素），但因為是使用者按側鍵的明確動作，
+     * 抓錯了按 Esc 再來一次即可，不像自動觸發那樣會默默出錯。
+     */
+    static boolean pickAt(final int x, final int y) {
+        final ShotService s = instance;
+        if (s == null) return false;
+        final boolean[] r = new boolean[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        s.main.post(() -> {
+            try {
+                AccessibilityNodeInfo n = s.findTextNodeAt(x, y);
+                if (n == null) return;
+                CharSequence t = n.getText();
+                if (t == null || t.toString().trim().isEmpty()) return;
+                Rect b = new Rect();
+                n.getBoundsInScreen(b);
+                s.showPick(t.toString(), b);
+                r[0] = true;
+            } catch (Throwable ex) {
+                android.util.Log.w(TAG, "ShotService: pickAt 失敗 " + ex);
+            } finally {
+                latch.countDown();
+            }
+        });
+        try { latch.await(2, TimeUnit.SECONDS); } catch (InterruptedException ignore) { }
+        return r[0];
+    }
+
     /** 控制指令 10：PC 跨屏進平板 arm、離開 disarm。 */
     static void setArm(boolean on, long ttlMs) {
         ShotService s = instance;

@@ -56,6 +56,12 @@ class ImageServer {
      */
     private static final int CTRL_ARM_PICK = 10;
     private static final long ARM_TTL_MS = 10 * 60 * 1000L;
+    /**
+     * 11 = 對游標下（帶 [4B x][4B y]）的訊息開選字層，給側鍵用。
+     * 純連結／純數字的訊息點下去會被 LinkMovementMethod 吃掉、不產生點擊事件，
+     * 只能靠這條明確動作。
+     */
+    private static final int CTRL_PICK_AT = 11;
     private static final int SHOT_TIMEOUT_S = 120;   // 使用者慢慢框，別急著斷線
     /** 框選截圖的失敗回傳碼（負數，與正常的 PNG 長度不會混淆）。 */
     private static final int SHOT_NO_SVC = -1;       // 無障礙服務沒開
@@ -184,13 +190,14 @@ class ImageServer {
                     out.flush();
                     return;
                 }
-                if (cmd == CTRL_COPY_TEXT) {
+                if (cmd == CTRL_COPY_TEXT || cmd == CTRL_PICK_AT) {
                     int x = in.readInt();
                     int y = in.readInt();
                     boolean ok = false;
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
                             && ShotService.available()) {
-                        ok = ShotService.copyText(x, y);
+                        ok = (cmd == CTRL_PICK_AT)
+                                ? ShotService.pickAt(x, y) : ShotService.copyText(x, y);
                     } else {
                         Log.w(TAG, "ImageServer: 取字需要無障礙服務（ShotService）");
                     }
