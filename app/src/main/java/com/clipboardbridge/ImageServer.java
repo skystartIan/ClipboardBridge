@@ -40,6 +40,14 @@ class ImageServer {
     private static final int CTRL_SHARE_FILE = 5;
     /** 6 = 框選截圖：叫出 ShotService 的遮罩，裁好後把 PNG 從本連線回傳 */
     private static final int CTRL_REGION_SHOT = 6;
+    /**
+     * 7 = 把游標下那則 LINE 訊息帶進「選取文字」畫面（之後使用者自己拉範圍）
+     * 8 = 直接把游標下的整段文字寫進平板剪貼簿
+     * 兩者都額外帶 [4B x][4B y]（平板實體像素，Sync 推算的游標位置），
+     * 7 再多一個 [1B 是否上遮罩]。回 1 byte：1=有做、0=沒做。
+     */
+    private static final int CTRL_SELECT_TEXT = 7;
+    private static final int CTRL_COPY_TEXT = 8;
     private static final int SHOT_TIMEOUT_S = 120;   // 使用者慢慢框，別急著斷線
     /** 框選截圖的失敗回傳碼（負數，與正常的 PNG 長度不會混淆）。 */
     private static final int SHOT_NO_SVC = -1;       // 無障礙服務沒開
@@ -157,6 +165,23 @@ class ImageServer {
                         dos.writeInt(r.cancelled ? 0 : SHOT_FAILED);
                     }
                     dos.flush();
+                    return;
+                }
+                if (cmd == CTRL_SELECT_TEXT || cmd == CTRL_COPY_TEXT) {
+                    int x = in.readInt();
+                    int y = in.readInt();
+                    boolean mask = (cmd == CTRL_SELECT_TEXT) && in.read() == 1;
+                    boolean ok = false;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                            && ShotService.available()) {
+                        ok = (cmd == CTRL_SELECT_TEXT)
+                                ? ShotService.selectText(x, y, mask)
+                                : ShotService.copyText(x, y);
+                    } else {
+                        Log.w(TAG, "ImageServer: 取字需要無障礙服務（ShotService）");
+                    }
+                    out.write(ok ? 1 : 0);
+                    out.flush();
                     return;
                 }
                 Log.d(TAG, "ImageServer: DropZone ctrl " + cmd + " from " + ip);

@@ -1,6 +1,7 @@
 package com.clipboardbridge;
 
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.Context;
 import android.database.Cursor;
 import android.graphics.Color;
@@ -193,6 +194,16 @@ class DropZone {
                 locLogged = false;
                 Log.d(TAG, "DropZone: DRAG_STARTED " + state()
                         + " desc=" + e.getClipDescription());
+                if (isTextOnly(e.getClipDescription())) {
+                    // 純文字拖曳不可能是檔案傳輸。最常見的來源是在 LINE 的
+                    // 「選取文字」畫面用滑鼠拉選取範圍——Android 會為此發起
+                    // 一場貨真價實的全域拖曳（text/plain）。回報給 PC 的話
+                    // 投放區會亮起來，而且 PC 的 should_release_for_drop 會在
+                    // 游標靠近返回邊緣時自動放開左鍵，選取直接被打斷。
+                    // 回 false ＝ 整場拖曳都不再收到事件，也不會成為 drop target。
+                    Log.d(TAG, "DropZone: 純文字拖曳，本場不參與");
+                    return false;
+                }
                 notifyPc(1);   // 告訴 PC：平板拖曳開始（供提早放開左鍵）
                 return true;   // 一律表達興趣（是否收得到 drop 由 touchable 決定）
             case DragEvent.ACTION_DRAG_LOCATION:
@@ -222,6 +233,26 @@ class DropZone {
                 return true;
         }
         return false;
+    }
+
+    /**
+     * 這場拖曳是不是「純文字」。
+     *
+     * 要求**每一個** MIME 都是文字類才算：LINE 之類的 App 拖圖片時常常
+     * 同時帶 text/plain 和 content URI，用「有 text 就當文字」會誤殺真正的
+     * 檔案拖曳。
+     */
+    private static boolean isTextOnly(ClipDescription d) {
+        if (d == null || d.getMimeTypeCount() == 0) return false;
+        for (int i = 0; i < d.getMimeTypeCount(); i++) {
+            String m = d.getMimeType(i);
+            if (m == null) continue;
+            if (!m.startsWith("text/")
+                    && !ClipDescription.MIMETYPE_TEXT_INTENT.equals(m)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void handleDrop(DragEvent e) {
