@@ -107,6 +107,8 @@ public class ShotService extends AccessibilityService {
     private static final String PKG_LINE = "jp.naver.line.android";
     /** 長按選單裡那一項的文字。LINE 改版換字時 PC 端可用控制指令帶新值進來。 */
     private static final String MENU_SELECT_TEXT = "選取文字";
+    /** 訊息選單裡必定存在的一項——用來判斷選單到底有沒有開（見 waitMenu）。 */
+    private static final String MENU_PROBE_TEXT = "複製";
     private static final long MENU_POLL_MS = 120;      // 每隔多久找一次選單
     /** 從長按算起等多久；PC 的 UHID 長按約 0.65 秒後才放開，要留足餘裕。 */
     private static final long MENU_WAIT_MS = 2200;
@@ -499,21 +501,21 @@ public class ShotService extends AccessibilityService {
             android.util.Log.w(TAG, "ShotService: 長按失敗 " + t);
         }
         android.util.Log.d(TAG, "ShotService: 取字長按 (" + x + "," + y + ") ok=" + ok);
-        final int base = windowCount();
-        main.postDelayed(() -> waitMenu(1, base), MENU_POLL_MS);
+        main.postDelayed(() -> waitMenu(1), MENU_POLL_MS);
     }
 
     /**
      * 等長按選單出現 → 點「選取文字」。等的是 PC 那邊 UHID 實體長按的結果。
      *
-     * 放棄時只有在「確實多了一個視窗」才送 BACK 把選單收掉——沒看到選單
-     * 就送 BACK 會直接退出聊天室，那個副作用比留著選單嚴重得多。
-     * （註：本服務沒宣告 flagRetrieveInteractiveWindows，getWindows() 實際
-     * 回空陣列，所以目前等於「永遠不送 BACK」＝偏安全那側。）
+     * 放棄時要不要送 BACK 收掉選單，用「選單裡有沒有『複製』」判斷：那一項
+     * 在 LINE 的訊息選單裡必定存在，看得到它就表示選單確實開著、BACK 只會
+     * 關掉選單；看不到就什麼都別做——沒有選單時送 BACK 會直接退出聊天室。
+     * （原本想用 getWindows() 數視窗，但本服務沒宣告
+     * flagRetrieveInteractiveWindows，它實際回空陣列。）
      */
-    private void waitMenu(int tries, int base) {
+    private void waitMenu(int tries) {
         if (!picking) return;
-        AccessibilityNodeInfo item = findMenuItem();
+        AccessibilityNodeInfo item = findByText(MENU_SELECT_TEXT);
         if (item != null) {
             AccessibilityNodeInfo c = item;
             try {
@@ -527,8 +529,8 @@ public class ShotService extends AccessibilityService {
         }
         long elapsed = tries * MENU_POLL_MS;
         if (elapsed >= MENU_WAIT_MS) {
-            if (windowCount() > base) {
-                android.util.Log.d(TAG, "ShotService: 選單裡沒有「"
+            if (findByText(MENU_PROBE_TEXT) != null) {
+                android.util.Log.d(TAG, "ShotService: 選單有開但沒有「"
                         + MENU_SELECT_TEXT + "」，收掉");
                 performGlobalAction(GLOBAL_ACTION_BACK);
             } else {
@@ -537,47 +539,90 @@ public class ShotService extends AccessibilityService {
             main.postDelayed(this::endPick, MASK_LINGER_MS);
             return;
         }
-        main.postDelayed(() -> waitMenu(tries + 1, base), MENU_POLL_MS);
+        main.postDelayed(() -> waitMenu(tries + 1), MENU_POLL_MS);
     }
 
-    private AccessibilityNodeInfo findMenuItem() {
+    /** 目前畫面上可見的、文字等於 text 的節點。 */
+    private AccessibilityNodeInfo findByText(String text) {
         try {
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root == null) return null;
             List<AccessibilityNodeInfo> found =
-                    root.findAccessibilityNodeInfosByText(MENU_SELECT_TEXT);
+                    root.findAccessibilityNodeInfosByText(text);
             if (found == null) return null;
             for (AccessibilityNodeInfo n : found) {
-                if (n != null && n.isVisibleToUser()) return n;
+                // findAccessibilityNodeInfosByText 是「包含」比對，這裡要求
+                // 完全相等：否則聊天室裡剛好有一則訊息寫著「選取文字」就會
+                // 被當成選單項點下去。
+                if (n != null && n.isVisibleToUser() && n.getText() != null
+                        && text.equals(n.getText().toString().trim())) {
+                    return n;
+                }
             }
         } catch (Throwable t) {
-            android.util.Log.w(TAG, "ShotService: 找選單失敗 " + t);
+            android.util.Log.w(TAG, "ShotService: 找節點「" + text + "」失敗 " + t);
         }
         return null;
     }
 
-    /** 目前有幾個視窗——用來判斷長按到底有沒有叫出彈出選單。 */
-    private int windowCount() {
-        try {
-            return getWindows() == null ? 0 : getWindows().size();
-        } catch (Throwable t) {
-            return 0;
-        }
-    }
-
     /**
-     * (x,y) 命中的最深、且**有 getText()** 的節點。
+     * (x,y) 命中的最深、且**有 getText()** 的節點；精準命中不到就找附近最近的。
      *
      * 只認 getText()，絕不認 contentDescription：LINE 的圖片、貼圖、通話
      * 記錄都是靠 contentDescription 提供無障礙文字的，認了就會把它們誤判
      * 成文字訊息而去長按。
+     *
+     * 為什麼可以放寬到「附近」：座標是 PC 用航位推算估出來的游標位置，實測
+     * 誤差數十像素，常常掉進訊息泡泡之間的縫隙而查無文字（2026-07-22 實測
+     * 每次都卡在這）。但**真正叫出選單的是 PC 用 UHID 在真實游標位置送的
+     * 長按**，這裡的節點查找只是一道「游標大概在不在訊息區」的閘門——抓到
+     * 隔壁那則也無所謂，因為它不決定長按到哪裡。所以寧可寬鬆。
+     * 反過來，點在圖片/貼圖上時附近沒有文字節點，閘門照樣擋得住。
      */
+    private static final int NEAR_X_PX = 60;
+    private static final int NEAR_Y_PX = 120;
+
     private AccessibilityNodeInfo findTextNodeAt(int x, int y) {
         try {
-            return deepestTextNode(getRootInActiveWindow(), x, y);
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            AccessibilityNodeInfo hit = deepestTextNode(root, x, y);
+            if (hit != null) return hit;
+            Best best = new Best();
+            nearestTextNode(root, x, y, best);
+            if (best.node != null) {
+                android.util.Log.d(TAG, "ShotService: (" + x + "," + y
+                        + ") 沒直接命中，取附近節點 dist=" + best.score);
+            }
+            return best.node;
         } catch (Throwable t) {
             android.util.Log.w(TAG, "ShotService: 節點查找失敗 " + t);
             return null;
+        }
+    }
+
+    private static final class Best {
+        AccessibilityNodeInfo node;
+        int score = Integer.MAX_VALUE;
+    }
+
+    private void nearestTextNode(AccessibilityNodeInfo n, int x, int y, Best best) {
+        if (n == null) return;
+        CharSequence t = n.getText();
+        if (t != null && !t.toString().trim().isEmpty()) {
+            Rect b = new Rect();
+            n.getBoundsInScreen(b);
+            int dx = Math.max(0, Math.max(b.left - x, x - b.right));
+            int dy = Math.max(0, Math.max(b.top - y, y - b.bottom));
+            if (dx <= NEAR_X_PX && dy <= NEAR_Y_PX) {
+                int score = dx * 2 + dy;      // 水平偏移比垂直更可疑
+                if (score < best.score) {
+                    best.score = score;
+                    best.node = n;
+                }
+            }
+        }
+        for (int i = 0; i < n.getChildCount(); i++) {
+            nearestTextNode(n.getChild(i), x, y, best);
         }
     }
 
