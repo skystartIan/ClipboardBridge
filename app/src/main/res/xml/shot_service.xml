@@ -5,6 +5,9 @@
      canRetrieveWindowContent → 按下 F1 當下查得到前景是哪個 App，用來決定要
                                 接手截圖還是放行給遠端桌面（見 ShotService）。
                                 只讀 root 節點的 packageName，不碰內容。
+     typeViewClicked          → 使用者用滑鼠點訊息時，事件的 source 就是被點的那個節點。
+                                取字功能靠它精確認出「點的是哪一則」，不必用 PC 推算的座標
+                                （推算誤差 30~90px，而訊息泡泡才 46px 高，會選錯訊息）。
      flagRetrieveInteractiveWindows → getWindows() 才會回傳整份視窗清單。
                                 LINE 的訊息長按選單是獨立的 PopupWindow，
                                 getRootInActiveWindow()（只給「有輸入焦點的
@@ -13,7 +16,7 @@
                                 這是 flag 不是 capability，不影響權限集合。
      注意：動到這裡的 capability，系統會在更新後把服務停用，要手動重新開啟。 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeViewClicked"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRequestFilterKeyEvents|flagRetrieveInteractiveWindows"
     android:canRequestFilterKeyEvents="true"

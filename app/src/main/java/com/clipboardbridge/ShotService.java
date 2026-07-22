@@ -224,9 +224,13 @@ public class ShotService extends AccessibilityService {
         super.onDestroy();
     }
 
-    /** 只為了記住前景是誰（shot_service.xml 已宣告 typeWindowStateChanged）。 */
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            onViewClicked(event);
+            return;
+        }
+        // 以下只為了記住前景是誰（shot_service.xml 宣告的 typeWindowStateChanged）
         if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
         CharSequence p = event.getPackageName();
         if (p == null) return;
@@ -235,6 +239,44 @@ public class ShotService extends AccessibilityService {
         if (TRANSIENT.contains(pkg) || getPackageName().equals(pkg)) return;
         topPkg = pkg;
         onForegroundChanged(pkg);
+    }
+
+    /**
+     * 使用者點了某個節點（滑鼠或手指皆會觸發）。
+     *
+     * 這是取字功能的入口：事件的 source **就是被點的那個節點**，不必用 PC 推算的座標去猜
+     * ——推算誤差 30~90px 而訊息泡泡才 46px 高，先前「選錯訊息」正是這麼來的。
+     *
+     * 目前這一版只驗證前提（事件送不送得出來、source 有沒有文字），確認後才接上選字覆蓋層。
+     */
+    private void onViewClicked(AccessibilityEvent event) {
+        try {
+            CharSequence p = event.getPackageName();
+            String pkg = p == null ? "" : p.toString();
+            if (!PKG_LINE.equals(pkg)) return;      // 先只觀察 LINE，免得洗版
+            AccessibilityNodeInfo src = event.getSource();
+            CharSequence t = src == null ? null : src.getText();
+            String head = t == null ? "(無文字)"
+                    : t.toString().substring(0, Math.min(12, t.length()));
+            Rect b = new Rect();
+            if (src != null) src.getBoundsInScreen(b);
+            android.util.Log.d(TAG, "ShotService: 點擊事件 pkg=" + pkg
+                    + " cls=" + event.getClassName()
+                    + " 文字=「" + head + "」 len=" + (t == null ? 0 : t.length())
+                    + " bounds=" + b);
+            // 附帶觀察：LINE 若有註冊自訂無障礙動作（例如就是「選擇並複製」），
+            // 未來可以一個 performAction 直接叫出它原生的選取畫面
+            if (src != null && src.getActionList() != null) {
+                StringBuilder sb = new StringBuilder();
+                for (AccessibilityNodeInfo.AccessibilityAction a : src.getActionList()) {
+                    sb.append(a.getLabel() == null
+                            ? Integer.toHexString(a.getId()) : a.getLabel()).append(' ');
+                }
+                android.util.Log.d(TAG, "ShotService: 可用動作 = " + sb);
+            }
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "ShotService: 點擊事件處理失敗 " + t);
+        }
     }
 
     /**
