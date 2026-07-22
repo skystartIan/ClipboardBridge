@@ -105,9 +105,19 @@ public class ShotService extends AccessibilityService {
      * 只對 LINE 做：別的 App 要嘛本來就能拖曳選取，要嘛沒有這個選單。
      */
     private static final String PKG_LINE = "jp.naver.line.android";
-    /** 長按選單裡那一項的文字。LINE 改版換字時 PC 端可用控制指令帶新值進來。 */
-    private static final String MENU_SELECT_TEXT = "選取文字";
-    /** 訊息選單裡必定存在的一項——用來判斷選單到底有沒有開（見 waitMenu）。 */
+    /**
+     * 長按選單裡「進入文字選取模式」那一項的文字。
+     *
+     * 實機（2026-07-22、Tab S11+）叫「選擇並複製」——不是我原本猜的
+     * 「選取文字」。列成陣列是為了 LINE 改版或不同語系時多一層保險，
+     * 依序找，第一個找到的就點。
+     */
+    private static final String[] MENU_SELECT_TEXTS = {
+            "選擇並複製", "選取文字", "選擇文字", "Select text"};
+    /**
+     * 訊息選單裡必定存在的一項——用來判斷選單到底有沒有開（見 waitMenu）。
+     * 注意比對是「完全相等」，所以不會被「選擇並複製」誤中。
+     */
     private static final String MENU_PROBE_TEXT = "複製";
     private static final long MENU_POLL_MS = 120;      // 每隔多久找一次選單
     /** 從長按算起等多久；PC 的 UHID 長按約 0.65 秒後才放開，要留足餘裕。 */
@@ -505,7 +515,7 @@ public class ShotService extends AccessibilityService {
     }
 
     /**
-     * 等長按選單出現 → 點「選取文字」。等的是 PC 那邊 UHID 實體長按的結果。
+     * 等長按選單出現 → 點「選擇並複製」。等的是 PC 那邊 UHID 實體長按的結果。
      *
      * 放棄時要不要送 BACK 收掉選單，用「選單裡有沒有『複製』」判斷：那一項
      * 在 LINE 的訊息選單裡必定存在，看得到它就表示選單確實開著、BACK 只會
@@ -515,15 +525,21 @@ public class ShotService extends AccessibilityService {
      */
     private void waitMenu(int tries) {
         if (!picking) return;
-        AccessibilityNodeInfo item = findByText(MENU_SELECT_TEXT);
+        AccessibilityNodeInfo item = null;
+        for (String s : MENU_SELECT_TEXTS) {
+            item = findByText(s);
+            if (item != null) break;
+        }
         if (item != null) {
             AccessibilityNodeInfo c = item;
             try {
                 while (c != null && !c.isClickable()) c = c.getParent();
             } catch (Throwable ignore) { c = null; }
+            CharSequence label = item.getText() != null
+                    ? item.getText() : item.getContentDescription();
             boolean ok = (c != null ? c : item)
                     .performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            android.util.Log.d(TAG, "ShotService: 點「" + MENU_SELECT_TEXT + "」ok=" + ok);
+            android.util.Log.d(TAG, "ShotService: 點「" + label + "」ok=" + ok);
             main.postDelayed(this::endPick, MASK_LINGER_MS);
             return;
         }
@@ -531,7 +547,7 @@ public class ShotService extends AccessibilityService {
         if (elapsed >= MENU_WAIT_MS) {
             if (findByText(MENU_PROBE_TEXT) != null) {
                 android.util.Log.d(TAG, "ShotService: 選單有開但沒有「"
-                        + MENU_SELECT_TEXT + "」，收掉");
+                        + MENU_SELECT_TEXTS[0] + "」，收掉");
                 performGlobalAction(GLOBAL_ACTION_BACK);
             } else {
                 android.util.Log.d(TAG, "ShotService: 長按沒有叫出任何選單，放棄");
@@ -542,7 +558,7 @@ public class ShotService extends AccessibilityService {
         main.postDelayed(() -> waitMenu(tries + 1), MENU_POLL_MS);
     }
 
-    /** 目前畫面上可見的、文字等於 text 的節點。 */
+    /** 目前畫面上可見的、文字（或無障礙描述）等於 text 的節點。 */
     private AccessibilityNodeInfo findByText(String text) {
         try {
             AccessibilityNodeInfo root = getRootInActiveWindow();
@@ -552,10 +568,12 @@ public class ShotService extends AccessibilityService {
             if (found == null) return null;
             for (AccessibilityNodeInfo n : found) {
                 // findAccessibilityNodeInfosByText 是「包含」比對，這裡要求
-                // 完全相等：否則聊天室裡剛好有一則訊息寫著「選取文字」就會
-                // 被當成選單項點下去。
-                if (n != null && n.isVisibleToUser() && n.getText() != null
-                        && text.equals(n.getText().toString().trim())) {
+                // 完全相等：否則聊天室裡剛好有一則訊息寫著「選擇並複製」就
+                // 會被當成選單項點下去。文字或 contentDescription 都算——
+                // 選單項是圖示配文字，不同版本擺放位置不一定相同。
+                if (n == null || !n.isVisibleToUser()) continue;
+                if (text.equals(trimmed(n.getText()))
+                        || text.equals(trimmed(n.getContentDescription()))) {
                     return n;
                 }
             }
@@ -563,6 +581,10 @@ public class ShotService extends AccessibilityService {
             android.util.Log.w(TAG, "ShotService: 找節點「" + text + "」失敗 " + t);
         }
         return null;
+    }
+
+    private static String trimmed(CharSequence cs) {
+        return cs == null ? null : cs.toString().trim();
     }
 
     /**
