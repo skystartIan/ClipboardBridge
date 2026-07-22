@@ -136,6 +136,8 @@ public class ShotService extends AccessibilityService {
      */
     private static final long MENU_MIN_WAIT_MS = 450;
     private static final long MASK_LINGER_MS = 400;    // 點完選單再多蓋一下
+    /** 點完選單 → 選取畫面起來 → 收合「整則全選」的等待時間。 */
+    private static final long COLLAPSE_DELAY_MS = 600;
     /**
      * 遮罩的硬逾時。這條路上每一步都可能卡住（節點沒反應、選單不出來、
      * 遮罩被系統強制隱藏），所以不用任何持久旗標判斷收尾——時間到就無條件
@@ -502,25 +504,20 @@ public class ShotService extends AccessibilityService {
     }
 
     /**
-     * 試著長按目標節點叫出選單。
+     * 清場並開始等選單。
      *
-     * ⚠️ 對 LINE **這一步是無效的**（2026-07-22 實測）：performAction 回
-     * true 只代表事件有派送出去，選單根本不會出現。真正叫出選單的是 PC 端
-     * 用 UHID 送的實體滑鼠長按（見 tablet_text._long_press），時間上緊接在
-     * 這之後，本函式接著的輪詢等的就是它的結果。
+     * ⚠️ **這裡不做 ACTION_LONG_CLICK**。真正叫出選單的是 PC 端用 UHID 在
+     * 真實游標位置送的實體長按（見 tablet_text._long_press）。曾經在這裡也
+     * 補一次 ACTION_LONG_CLICK「反正成本是零」，實測是有害的：它按的是
+     * **閘門找到的節點**，而閘門是用有誤差的推算座標找的、可能是隔壁那則
+     * → 先彈出一個錯的選單，PC 的長按再彈一個對的（使用者看到「選單閃兩
+     * 下」），而輪詢可能先抓到錯的那個。座標的事交給真實游標，這裡只等。
      *
-     * 這裡保留 ACTION_LONG_CLICK 是因為對別的 App 可能有效、成本是零。
-     * 曾經有 dispatchGesture 後備，已移除：無障礙服務要宣告
-     * canPerformGestures 才能派送手勢，ShotService 的 capabilities=137 沒有
-     * 它，是靜默失效；而改宣告會讓系統停用服務、要手動重開無障礙。
+     * 也曾有 dispatchGesture 後備，已移除：無障礙服務要宣告
+     * canPerformGestures 才能派送手勢，ShotService 的 capabilities 沒有它，
+     * 是靜默失效；而改宣告會讓系統停用服務、要手動重開無障礙。
      */
     private void longPress(AccessibilityNodeInfo node, int x, int y) {
-        AccessibilityNodeInfo target = node;
-        try {
-            AccessibilityNodeInfo p = node;
-            while (p != null && !p.isLongClickable()) p = p.getParent();
-            if (p != null) target = p;
-        } catch (Throwable ignore) { }
         // 畫面上若還留著上一次的選單，先收掉：不然接下來的輪詢會立刻找到
         // 它並點下去，選到的是**上一則**訊息。同時記下它的 windowId 當黑
         // 名單，萬一 BACK 沒收掉也不會誤採。
@@ -532,13 +529,7 @@ public class ShotService extends AccessibilityService {
                     + staleMenuWindow + ")，先收掉");
             performGlobalAction(GLOBAL_ACTION_BACK);
         }
-        boolean ok = false;
-        try {
-            ok = target.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK);
-        } catch (Throwable t) {
-            android.util.Log.w(TAG, "ShotService: 長按失敗 " + t);
-        }
-        android.util.Log.d(TAG, "ShotService: 取字長按 (" + x + "," + y + ") ok=" + ok);
+        android.util.Log.d(TAG, "ShotService: 等 PC 長按 (" + x + "," + y + ")");
         // 用真實時間當截止點，不要用「輪詢次數 × 間隔」估——每輪要掃所有
         // 視窗，實測誤差達 25%，估出來的逾時會晚於遮罩的硬逾時，導致收尾
         // 的判斷根本沒機會執行（日誌上看起來像默默消失）。
@@ -580,6 +571,7 @@ public class ShotService extends AccessibilityService {
             boolean ok = (c != null ? c : item)
                     .performAction(AccessibilityNodeInfo.ACTION_CLICK);
             android.util.Log.d(TAG, "ShotService: 點「" + label + "」ok=" + ok);
+            main.postDelayed(this::collapseSelection, COLLAPSE_DELAY_MS);
             main.postDelayed(this::endPick, MASK_LINGER_MS);
             return;
         }
@@ -611,6 +603,63 @@ public class ShotService extends AccessibilityService {
             if (n != null) return n;
         }
         return null;
+    }
+
+    /**
+     * 解除 LINE 選取模式預設的「整則全選」，讓滑鼠可以直接拖曳框選。
+     *
+     * 不能用注入方向鍵：LINE 的訊息是**不可編輯**的 TextView，方向鍵在這種
+     * view 上只會移動焦點、不會收合選取（實測無效）。用無障礙的
+     * ACTION_SET_SELECTION、start==end 把選取收合成一個插入點才是對的工具。
+     *
+     * 目標節點＝所有視窗裡「支援 ACTION_SET_SELECTION 且文字最長」的那個
+     * ——選取畫面顯示的就是整則訊息，必定是畫面上最長的一段。
+     */
+    private void collapseSelection() {
+        try {
+            AccessibilityNodeInfo target = null;
+            int longest = 0;
+            for (AccessibilityNodeInfo root : roots()) {
+                Best2 b = new Best2();
+                findSelectable(root, b);
+                if (b.node != null && b.len > longest) {
+                    longest = b.len;
+                    target = b.node;
+                }
+            }
+            if (target == null) {
+                android.util.Log.d(TAG, "ShotService: 找不到可收合選取的節點");
+                return;
+            }
+            android.os.Bundle args = new android.os.Bundle();
+            args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0);
+            args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 0);
+            boolean ok = target.performAction(
+                    AccessibilityNodeInfo.ACTION_SET_SELECTION, args);
+            android.util.Log.d(TAG, "ShotService: 收合全選（" + longest + " 字）ok=" + ok);
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "ShotService: 收合全選失敗 " + t);
+        }
+    }
+
+    private static final class Best2 {
+        AccessibilityNodeInfo node;
+        int len;
+    }
+
+    private void findSelectable(AccessibilityNodeInfo n, Best2 best) {
+        if (n == null) return;
+        CharSequence t = n.getText();
+        if (t != null && t.length() > best.len
+                && n.getActionList() != null
+                && n.getActionList().contains(
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION)) {
+            best.node = n;
+            best.len = t.length();
+        }
+        for (int i = 0; i < n.getChildCount(); i++) {
+            findSelectable(n.getChild(i), best);
+        }
     }
 
     /** 畫面上是否已經開著一個訊息選單（用必定存在的「複製」判斷）。 */
