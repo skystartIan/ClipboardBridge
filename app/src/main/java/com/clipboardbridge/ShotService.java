@@ -1,7 +1,6 @@
 package com.clipboardbridge;
 
 import android.accessibilityservice.AccessibilityService;
-import android.accessibilityservice.GestureDescription;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -9,7 +8,6 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.hardware.HardwareBuffer;
@@ -110,9 +108,8 @@ public class ShotService extends AccessibilityService {
     /** 長按選單裡那一項的文字。LINE 改版換字時 PC 端可用控制指令帶新值進來。 */
     private static final String MENU_SELECT_TEXT = "選取文字";
     private static final long MENU_POLL_MS = 120;      // 每隔多久找一次選單
-    private static final long MENU_WAIT_MS = 2000;     // 找不到就放棄
-    private static final long GESTURE_FALLBACK_MS = 600;   // 改用真實觸控長按
-    private static final long GESTURE_HOLD_MS = 500;
+    /** 從長按算起等多久；PC 的 UHID 長按約 0.65 秒後才放開，要留足餘裕。 */
+    private static final long MENU_WAIT_MS = 2200;
     private static final long MASK_LINGER_MS = 400;    // 點完選單再多蓋一下
     /**
      * 遮罩的硬逾時。這條路上每一步都可能卡住（節點沒反應、選單不出來、
@@ -476,10 +473,17 @@ public class ShotService extends AccessibilityService {
     }
 
     /**
-     * 長按目標節點叫出選單。
+     * 試著長按目標節點叫出選單。
      *
-     * ACTION_LONG_CLICK 要下在真正 long-clickable 的那一層（LINE 的文字
-     * TextView 常常只是容器的小孩），所以往上找第一個可長按的祖先。
+     * ⚠️ 對 LINE **這一步是無效的**（2026-07-22 實測）：performAction 回
+     * true 只代表事件有派送出去，選單根本不會出現。真正叫出選單的是 PC 端
+     * 用 UHID 送的實體滑鼠長按（見 tablet_text._long_press），時間上緊接在
+     * 這之後，本函式接著的輪詢等的就是它的結果。
+     *
+     * 這裡保留 ACTION_LONG_CLICK 是因為對別的 App 可能有效、成本是零。
+     * 曾經有 dispatchGesture 後備，已移除：無障礙服務要宣告
+     * canPerformGestures 才能派送手勢，ShotService 的 capabilities=137 沒有
+     * 它，是靜默失效；而改宣告會讓系統停用服務、要手動重開無障礙。
      */
     private void longPress(AccessibilityNodeInfo node, int x, int y) {
         AccessibilityNodeInfo target = node;
@@ -496,19 +500,18 @@ public class ShotService extends AccessibilityService {
         }
         android.util.Log.d(TAG, "ShotService: 取字長按 (" + x + "," + y + ") ok=" + ok);
         final int base = windowCount();
-        main.postDelayed(() -> waitMenu(1, x, y, false, base), MENU_POLL_MS);
+        main.postDelayed(() -> waitMenu(1, base), MENU_POLL_MS);
     }
 
     /**
-     * 等長按選單出現 → 點「選取文字」。
-     *
-     * 兩層保險：ACTION_LONG_CLICK 沒效果（有些 view 只認真實觸控）時，
-     * 600ms 後改用 dispatchGesture 送一次真的長按；再等不到就放棄。
+     * 等長按選單出現 → 點「選取文字」。等的是 PC 那邊 UHID 實體長按的結果。
      *
      * 放棄時只有在「確實多了一個視窗」才送 BACK 把選單收掉——沒看到選單
      * 就送 BACK 會直接退出聊天室，那個副作用比留著選單嚴重得多。
+     * （註：本服務沒宣告 flagRetrieveInteractiveWindows，getWindows() 實際
+     * 回空陣列，所以目前等於「永遠不送 BACK」＝偏安全那側。）
      */
-    private void waitMenu(int tries, int x, int y, boolean gestured, int base) {
+    private void waitMenu(int tries, int base) {
         if (!picking) return;
         AccessibilityNodeInfo item = findMenuItem();
         if (item != null) {
@@ -523,11 +526,6 @@ public class ShotService extends AccessibilityService {
             return;
         }
         long elapsed = tries * MENU_POLL_MS;
-        if (!gestured && elapsed >= GESTURE_FALLBACK_MS) {
-            gestureLongPress(x, y);
-            main.postDelayed(() -> waitMenu(tries + 1, x, y, true, base), MENU_POLL_MS);
-            return;
-        }
         if (elapsed >= MENU_WAIT_MS) {
             if (windowCount() > base) {
                 android.util.Log.d(TAG, "ShotService: 選單裡沒有「"
@@ -539,23 +537,7 @@ public class ShotService extends AccessibilityService {
             main.postDelayed(this::endPick, MASK_LINGER_MS);
             return;
         }
-        main.postDelayed(() -> waitMenu(tries + 1, x, y, gestured, base), MENU_POLL_MS);
-    }
-
-    /** 真實觸控長按（ACTION_LONG_CLICK 無效時的後備）。 */
-    private void gestureLongPress(int x, int y) {
-        try {
-            Path p = new Path();
-            p.moveTo(x, y);
-            GestureDescription g = new GestureDescription.Builder()
-                    .addStroke(new GestureDescription.StrokeDescription(
-                            p, 0, GESTURE_HOLD_MS))
-                    .build();
-            dispatchGesture(g, null, null);
-            android.util.Log.d(TAG, "ShotService: 改用觸控長按 (" + x + "," + y + ")");
-        } catch (Throwable t) {
-            android.util.Log.w(TAG, "ShotService: 觸控長按失敗 " + t);
-        }
+        main.postDelayed(() -> waitMenu(tries + 1, base), MENU_POLL_MS);
     }
 
     private AccessibilityNodeInfo findMenuItem() {
@@ -622,17 +604,17 @@ public class ShotService extends AccessibilityService {
                 protected void onDraw(Canvas canvas) {
                     if (maskShot != null) canvas.drawBitmap(maskShot, 0, 0, null);
                 }
-
-                @Override
-                public boolean onTouchEvent(MotionEvent e) {
-                    return true;   // 遮罩期間的點擊全部吃掉，免得打到底下看不見的選單
-                }
             };
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    // 一定要 NOT_TOUCHABLE：長按是 PC 用 UHID 送的真實滑鼠
+                    // 事件，遮罩若可觸控就會把那一按整個吃掉，選單永遠不會
+                    // 出現（2026-07-22 第一次實測就是死在這裡）。遮罩純粹
+                    // 是視覺上的，不參與輸入。
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                             | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.OPAQUE);
