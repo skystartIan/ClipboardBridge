@@ -5,11 +5,17 @@
      canRetrieveWindowContent → 按下 F1 當下查得到前景是哪個 App，用來決定要
                                 接手截圖還是放行給遠端桌面（見 ShotService）。
                                 只讀 root 節點的 packageName，不碰內容。
+     flagRetrieveInteractiveWindows → getWindows() 才會回傳整份視窗清單。
+                                LINE 的訊息長按選單是獨立的 PopupWindow，
+                                getRootInActiveWindow()（只給「有輸入焦點的
+                                那個視窗」＝聊天室本身）看不到它，連必定存在
+                                的「複製」都找不到（2026-07-22 實測確診）。
+                                這是 flag 不是 capability，不影響權限集合。
      注意：動到這裡的 capability，系統會在更新後把服務停用，要手動重新開啟。 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagRequestFilterKeyEvents"
+    android:accessibilityFlags="flagDefault|flagRequestFilterKeyEvents|flagRetrieveInteractiveWindows"
     android:canRequestFilterKeyEvents="true"
     android:canRetrieveWindowContent="true"
     android:canTakeScreenshot="true"

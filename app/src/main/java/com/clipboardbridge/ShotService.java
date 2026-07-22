@@ -120,8 +120,8 @@ public class ShotService extends AccessibilityService {
      */
     private static final String MENU_PROBE_TEXT = "複製";
     private static final long MENU_POLL_MS = 120;      // 每隔多久找一次選單
-    /** 從長按算起等多久；PC 的 UHID 長按約 0.65 秒後才放開，要留足餘裕。 */
-    private static final long MENU_WAIT_MS = 2200;
+    /** 從長按算起等多久；PC 的長按要 0.4s 後才按下、再按住 0.8s，要留餘裕。 */
+    private static final long MENU_WAIT_MS = 2500;
     private static final long MASK_LINGER_MS = 400;    // 點完選單再多蓋一下
     /**
      * 遮罩的硬逾時。這條路上每一步都可能卡住（節點沒反應、選單不出來、
@@ -129,7 +129,7 @@ public class ShotService extends AccessibilityService {
      * 撤掉。ShotService 的 busy 曾經因為「遮罩畫不出來→兩條清除路徑都走不到」
      * 而永久卡死整個框選功能，這裡不重蹈覆轍。
      */
-    private static final long MASK_TIMEOUT_MS = 3000;
+    private static final long MASK_TIMEOUT_MS = 3600;
 
     /** 裁切完成後的回呼（PC 走控制指令進來時用來取回 PNG）。 */
     interface ShotCallback {
@@ -511,7 +511,11 @@ public class ShotService extends AccessibilityService {
             android.util.Log.w(TAG, "ShotService: 長按失敗 " + t);
         }
         android.util.Log.d(TAG, "ShotService: 取字長按 (" + x + "," + y + ") ok=" + ok);
-        main.postDelayed(() -> waitMenu(1), MENU_POLL_MS);
+        // 用真實時間當截止點，不要用「輪詢次數 × 間隔」估——每輪要掃所有
+        // 視窗，實測誤差達 25%，估出來的逾時會晚於遮罩的硬逾時，導致收尾
+        // 的判斷根本沒機會執行（日誌上看起來像默默消失）。
+        final long deadline = android.os.SystemClock.uptimeMillis() + MENU_WAIT_MS;
+        main.postDelayed(() -> waitMenu(deadline), MENU_POLL_MS);
     }
 
     /**
@@ -523,7 +527,7 @@ public class ShotService extends AccessibilityService {
      * （原本想用 getWindows() 數視窗，但本服務沒宣告
      * flagRetrieveInteractiveWindows，它實際回空陣列。）
      */
-    private void waitMenu(int tries) {
+    private void waitMenu(long deadline) {
         if (!picking) return;
         AccessibilityNodeInfo item = null;
         for (String s : MENU_SELECT_TEXTS) {
@@ -543,8 +547,7 @@ public class ShotService extends AccessibilityService {
             main.postDelayed(this::endPick, MASK_LINGER_MS);
             return;
         }
-        long elapsed = tries * MENU_POLL_MS;
-        if (elapsed >= MENU_WAIT_MS) {
+        if (android.os.SystemClock.uptimeMillis() >= deadline) {
             if (findByText(MENU_PROBE_TEXT) != null) {
                 android.util.Log.d(TAG, "ShotService: 選單有開但沒有「"
                         + MENU_SELECT_TEXTS[0] + "」，收掉");
@@ -555,13 +558,47 @@ public class ShotService extends AccessibilityService {
             main.postDelayed(this::endPick, MASK_LINGER_MS);
             return;
         }
-        main.postDelayed(() -> waitMenu(tries + 1), MENU_POLL_MS);
+        main.postDelayed(() -> waitMenu(deadline), MENU_POLL_MS);
     }
 
-    /** 目前畫面上可見的、文字（或無障礙描述）等於 text 的節點。 */
+    /**
+     * 目前畫面上可見的、文字（或無障礙描述）等於 text 的節點。
+     *
+     * **一定要掃所有視窗**，不能只看 getRootInActiveWindow()：LINE 的訊息
+     * 長按選單是獨立的 PopupWindow、不搶輸入焦點，所以「有焦點的視窗」永遠
+     * 是聊天室本身，選單整棵樹都在外面（2026-07-22 實測：連必定存在的
+     * 「複製」都找不到，於是每次都走到「長按沒有叫出任何選單」）。
+     */
     private AccessibilityNodeInfo findByText(String text) {
+        for (AccessibilityNodeInfo root : roots()) {
+            AccessibilityNodeInfo n = findByTextIn(root, text);
+            if (n != null) return n;
+        }
+        return null;
+    }
+
+    /** 所有視窗的根節點（含有焦點的那個）。 */
+    private List<AccessibilityNodeInfo> roots() {
+        List<AccessibilityNodeInfo> out = new java.util.ArrayList<>();
         try {
-            AccessibilityNodeInfo root = getRootInActiveWindow();
+            AccessibilityNodeInfo active = getRootInActiveWindow();
+            if (active != null) out.add(active);
+            List<android.view.accessibility.AccessibilityWindowInfo> ws = getWindows();
+            if (ws != null) {
+                for (android.view.accessibility.AccessibilityWindowInfo w : ws) {
+                    if (w == null) continue;
+                    AccessibilityNodeInfo r = w.getRoot();
+                    if (r != null) out.add(r);
+                }
+            }
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "ShotService: 列視窗失敗 " + t);
+        }
+        return out;
+    }
+
+    private AccessibilityNodeInfo findByTextIn(AccessibilityNodeInfo root, String text) {
+        try {
             if (root == null) return null;
             List<AccessibilityNodeInfo> found =
                     root.findAccessibilityNodeInfosByText(text);
