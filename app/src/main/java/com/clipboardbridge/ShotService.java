@@ -238,6 +238,14 @@ public class ShotService extends AccessibilityService {
             // 聊天室清單時不會冒出選字層。用這個通用條件而不是比對 LINE 的
             // resource-id（chat_ui_message_text），免得 LINE 改版就失效。
             if (src == null || !src.isLongClickable()) return;
+            // 輸入框（EditText）本來就能選字、還有游標與貼上選單，蓋一層上去只會擋路。
+            // 實測：把文字貼進 LINE 的輸入框後再點它一下就會冒出選字層。
+            CharSequence cls = event.getClassName();
+            if (src.isEditable()
+                    || (cls != null && cls.toString().contains("EditText"))) {
+                android.util.Log.d(TAG, "ShotService: 可編輯欄位，不接手");
+                return;
+            }
             if (t == null || t.toString().trim().isEmpty()) return;
             if (!armed()) {
                 android.util.Log.d(TAG, "ShotService: 未啟用（沒有滑鼠也沒被 PC arm），略過");
