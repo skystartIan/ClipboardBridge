@@ -125,12 +125,16 @@ public class ShotService extends AccessibilityService {
     /**
      * 這麼早之前找到的選單一律不採信。
      *
-     * PC 端要等 0.4 秒（閃開雙擊判定）才按下去，Android 的長按門檻又是 0.5
-     * 秒，所以最快也要 0.9 秒才可能有「這次的」選單。實測踩過：上一次流程
+     * PC 端要等 0.2 秒（閃開雙擊判定）才按下去，Android 的長按門檻又是 0.5
+     * 秒，所以最快也要 0.7 秒才可能有「這次的」選單。實測踩過：上一次流程
      * 留在畫面上的舊選單會在 213ms 就被找到並點下去，於是**選到的是上一則
      * 訊息**——使用者回報的「選錯訊息」就是這麼來的，跟座標完全無關。
+     *
+     * 這個值必須小於 PC 端的「等待＋按住」總和（見 tablet_text.py），否則
+     * 連這次自己按出來的選單都會被濾掉。真正防舊選單的是 windowId 黑名單，
+     * 這道只是保險，所以取得比 0.7 秒寬鬆。
      */
-    private static final long MENU_MIN_WAIT_MS = 900;
+    private static final long MENU_MIN_WAIT_MS = 450;
     private static final long MASK_LINGER_MS = 400;    // 點完選單再多蓋一下
     /**
      * 遮罩的硬逾時。這條路上每一步都可能卡住（節點沒反應、選單不出來、
