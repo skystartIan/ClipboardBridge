@@ -121,7 +121,16 @@ public class ShotService extends AccessibilityService {
     private static final String MENU_PROBE_TEXT = "複製";
     private static final long MENU_POLL_MS = 120;      // 每隔多久找一次選單
     /** 從長按算起等多久；PC 的長按要 0.4s 後才按下、再按住 0.8s，要留餘裕。 */
-    private static final long MENU_WAIT_MS = 2500;
+    private static final long MENU_WAIT_MS = 3500;
+    /**
+     * 這麼早之前找到的選單一律不採信。
+     *
+     * PC 端要等 0.4 秒（閃開雙擊判定）才按下去，Android 的長按門檻又是 0.5
+     * 秒，所以最快也要 0.9 秒才可能有「這次的」選單。實測踩過：上一次流程
+     * 留在畫面上的舊選單會在 213ms 就被找到並點下去，於是**選到的是上一則
+     * 訊息**——使用者回報的「選錯訊息」就是這麼來的，跟座標完全無關。
+     */
+    private static final long MENU_MIN_WAIT_MS = 900;
     private static final long MASK_LINGER_MS = 400;    // 點完選單再多蓋一下
     /**
      * 遮罩的硬逾時。這條路上每一步都可能卡住（節點沒反應、選單不出來、
@@ -129,7 +138,7 @@ public class ShotService extends AccessibilityService {
      * 撤掉。ShotService 的 busy 曾經因為「遮罩畫不出來→兩條清除路徑都走不到」
      * 而永久卡死整個框選功能，這裡不重蹈覆轍。
      */
-    private static final long MASK_TIMEOUT_MS = 3600;
+    private static final long MASK_TIMEOUT_MS = 4600;
 
     /** 裁切完成後的回呼（PC 走控制指令進來時用來取回 PNG）。 */
     interface ShotCallback {
@@ -156,6 +165,10 @@ public class ShotService extends AccessibilityService {
     private boolean inRdp = false;
     /** 取字流程進行中（與框選截圖的 busy 各自獨立，互不影響）。 */
     private boolean picking = false;
+    /** 開場就已經在畫面上的舊選單的 windowId（-1＝沒有）。 */
+    private int staleMenuWindow = -1;
+    /** 早於這個時間點找到的選單一律不採信（見 MENU_MIN_WAIT_MS）。 */
+    private long menuNotBefore = 0;
     private View mask;
     private Bitmap maskShot;
     /** 遮罩無條件收掉，不管流程走到哪一步。 */
@@ -504,6 +517,17 @@ public class ShotService extends AccessibilityService {
             while (p != null && !p.isLongClickable()) p = p.getParent();
             if (p != null) target = p;
         } catch (Throwable ignore) { }
+        // 畫面上若還留著上一次的選單，先收掉：不然接下來的輪詢會立刻找到
+        // 它並點下去，選到的是**上一則**訊息。同時記下它的 windowId 當黑
+        // 名單，萬一 BACK 沒收掉也不會誤採。
+        staleMenuWindow = -1;
+        AccessibilityNodeInfo old = findAnyMenu();
+        if (old != null) {
+            staleMenuWindow = old.getWindowId();
+            android.util.Log.d(TAG, "ShotService: 畫面上有舊選單(win="
+                    + staleMenuWindow + ")，先收掉");
+            performGlobalAction(GLOBAL_ACTION_BACK);
+        }
         boolean ok = false;
         try {
             ok = target.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK);
@@ -514,7 +538,9 @@ public class ShotService extends AccessibilityService {
         // 用真實時間當截止點，不要用「輪詢次數 × 間隔」估——每輪要掃所有
         // 視窗，實測誤差達 25%，估出來的逾時會晚於遮罩的硬逾時，導致收尾
         // 的判斷根本沒機會執行（日誌上看起來像默默消失）。
-        final long deadline = android.os.SystemClock.uptimeMillis() + MENU_WAIT_MS;
+        final long now = android.os.SystemClock.uptimeMillis();
+        final long deadline = now + MENU_WAIT_MS;
+        menuNotBefore = now + MENU_MIN_WAIT_MS;
         main.postDelayed(() -> waitMenu(deadline), MENU_POLL_MS);
     }
 
@@ -530,9 +556,15 @@ public class ShotService extends AccessibilityService {
     private void waitMenu(long deadline) {
         if (!picking) return;
         AccessibilityNodeInfo item = null;
-        for (String s : MENU_SELECT_TEXTS) {
-            item = findByText(s);
-            if (item != null) break;
+        // 太早找到的、或 windowId 與開場那個舊選單相同的，都不是這次的
+        if (android.os.SystemClock.uptimeMillis() >= menuNotBefore) {
+            for (String s : MENU_SELECT_TEXTS) {
+                AccessibilityNodeInfo n = findByText(s);
+                if (n != null && n.getWindowId() != staleMenuWindow) {
+                    item = n;
+                    break;
+                }
+            }
         }
         if (item != null) {
             AccessibilityNodeInfo c = item;
@@ -575,6 +607,11 @@ public class ShotService extends AccessibilityService {
             if (n != null) return n;
         }
         return null;
+    }
+
+    /** 畫面上是否已經開著一個訊息選單（用必定存在的「複製」判斷）。 */
+    private AccessibilityNodeInfo findAnyMenu() {
+        return findByText(MENU_PROBE_TEXT);
     }
 
     /** 所有視窗的根節點（含有焦點的那個）。 */
