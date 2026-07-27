@@ -61,6 +61,14 @@ class ImageServer {
      * 只能靠這條明確動作。
      */
     private static final int CTRL_PICK_AT = 11;
+    /**
+     * 12 = 焦點輕推（無參數）。PC 把剪貼簿推進平板之後送這條。
+     *
+     * Winlator 只在 XServerDisplayActivity.onWindowFocusChanged(hasFocus) 那一刻
+     * 把 Android 剪貼簿推進 Wine，沒有 listener 也沒有輪詢；而滑鼠跨屏不產生
+     * 焦點變化，所以新內容在 Wine 裡貼不出來。見 FocusNudge。
+     */
+    private static final int CTRL_FOCUS_NUDGE = 12;
     private static final int SHOT_TIMEOUT_S = 120;   // 使用者慢慢框，別急著斷線
     /** 框選截圖的失敗回傳碼（負數，與正常的 PNG 長度不會混淆）。 */
     private static final int SHOT_NO_SVC = -1;       // 無障礙服務沒開
@@ -201,6 +209,12 @@ class ImageServer {
                         Log.w(TAG, "ImageServer: 取字需要無障礙服務（ShotService）");
                     }
                     out.write(ok ? 1 : 0);
+                    out.flush();
+                    return;
+                }
+                if (cmd == CTRL_FOCUS_NUDGE) {
+                    FocusNudge.nudge(context);
+                    out.write(1);
                     out.flush();
                     return;
                 }
