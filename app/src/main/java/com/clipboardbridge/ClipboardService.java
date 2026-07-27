@@ -4,7 +4,6 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
-import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
@@ -55,7 +54,7 @@ public class ClipboardService extends Service {
                 ClipboardManager cm = (ClipboardManager)
                         context.getSystemService(Context.CLIPBOARD_SERVICE);
                 if (cm != null) {
-                    cm.setPrimaryClip(ClipData.newUri(
+                    cm.setPrimaryClip(MediaStoreUtils.imageClip(
                             context.getContentResolver(), "image", uri));
                     Log.d(ClipboardReceiver.TAG, "✓ Clip set from uri (fg svc): " + uri);
                     showToast(context, "✓ 圖片已就緒，可貼上");
@@ -96,7 +95,7 @@ public class ClipboardService extends Service {
                 try {
                     ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
                     if (cm != null) {
-                        cm.setPrimaryClip(ClipData.newUri(context.getContentResolver(), "image", uri));
+                        cm.setPrimaryClip(MediaStoreUtils.imageClip(context.getContentResolver(), "image", uri));
                         Log.d(ClipboardReceiver.TAG, "✓ Set via ClipboardManager: " + uri);
                         showToast(context, "✓ 圖片已就緒，按 Ctrl+V 或長按貼上");
                     }

@@ -1,6 +1,5 @@
 package com.clipboardbridge;
 
-import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
@@ -302,7 +301,7 @@ class ImageServer {
                 ClipboardManager cm =
                         (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
                 if (cm != null) {
-                    cm.setPrimaryClip(ClipData.newUri(
+                    cm.setPrimaryClip(MediaStoreUtils.imageClip(
                             context.getContentResolver(), "image", uri));
                     ok.set(true);
                     Log.d(TAG, "ImageServer: clipboard set " + uri);

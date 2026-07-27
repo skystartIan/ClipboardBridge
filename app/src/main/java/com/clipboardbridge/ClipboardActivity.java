@@ -1,7 +1,6 @@
 package com.clipboardbridge;
 
 import android.app.Activity;
-import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -90,7 +89,7 @@ public class ClipboardActivity extends Activity {
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             Log.d(ClipboardReceiver.TAG, "ClipboardManager: " + (cm != null ? "OK" : "NULL"));
             if (cm != null) {
-                cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
+                cm.setPrimaryClip(MediaStoreUtils.imageClip(getContentResolver(), "image", uri));
                 success = true;
                 Log.d(ClipboardReceiver.TAG, "✓ Set via ClipboardManager: " + uri);
             }

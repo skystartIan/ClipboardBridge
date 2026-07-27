@@ -910,7 +910,7 @@ public class ShotService extends AccessibilityService {
                 ClipboardManager cm = (ClipboardManager)
                         getSystemService(Context.CLIPBOARD_SERVICE);
                 if (cm != null) {
-                    cm.setPrimaryClip(ClipData.newUri(getContentResolver(), "image", uri));
+                    cm.setPrimaryClip(MediaStoreUtils.imageClip(getContentResolver(), "image", uri));
                 }
                 MediaStoreUtils.deleteOthers(this, uri);
             }

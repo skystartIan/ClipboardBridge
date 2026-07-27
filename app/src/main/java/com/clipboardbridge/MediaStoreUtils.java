@@ -1,5 +1,8 @@
 package com.clipboardbridge;
 
+import android.content.ClipData;
+import android.content.ClipDescription;
+import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
@@ -16,6 +19,25 @@ class MediaStoreUtils {
     /** 清理策略：保留最近 KEEP_RECENT 張、且只刪 OLD_AGE_S 秒前的舊圖。 */
     private static final int KEEP_RECENT = 5;
     private static final long OLD_AGE_S = 10 * 60;   // 10 分鐘
+
+    /**
+     * 圖片 clip：item 0 一定要帶一個非 null 的 text，不能用 ClipData.newUri。
+     *
+     * Winlator 11.1 的 XServerDisplayActivity.onWindowFocusChanged 每次視窗重新
+     * 取得焦點都會把 Android 剪貼簿推進 Wine，而它只檢查了 clip 本身非 null：
+     *     winHandler.setClipboardData(primaryClip.getItemAt(0).getText().toString());
+     * 剪貼簿是純圖片時 getText() 回 null → NPE → Winlator 整個閃退，容器裡的
+     * wineserver 一起被帶走（2026-07-27 追到）。ClipData.newUri 造出來的正是
+     * 這種只有 URI 的 item，所以這裡自己組：description 仍然只宣告圖片 mime，
+     * 依 mime 判斷的貼上行為完全不變，只是 item 多掛一個空字串當保險。
+     * 自家 ClipAgent 是先看 getUri()、getText() 只是 fallback，不受影響。
+     */
+    static ClipData imageClip(ContentResolver cr, CharSequence label, Uri uri) {
+        String type = cr.getType(uri);
+        ClipDescription desc = new ClipDescription(
+                label, new String[]{ type != null ? type : "image/*" });
+        return new ClipData(desc, new ClipData.Item("", null, uri));
+    }
 
     /**
      * 清理 Pictures/ClipboardBridge 底下累積的橋接暫存圖，避免塞爆相簿。
