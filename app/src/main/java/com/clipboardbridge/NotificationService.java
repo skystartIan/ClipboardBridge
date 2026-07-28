@@ -23,6 +23,9 @@ public class NotificationService extends NotificationListenerService {
     private static final String TAG = "CBNotification";
     private static final int PC_PORT = 9999;
     private static final String ACTION_SET_PC_IP = "com.clipboardbridge.SET_PC_IP";
+    private static final String PREFS = "notif";
+    private static final String KEY_PC_IP = "pc_ip";
+    private static final String IP_FILE = "/sdcard/cb_pc_ip.txt";
     private String pcHost = null;
     private final java.util.Map<String, Long> recentNotifs = new java.util.HashMap<>();
     private static final long DEDUP_MS = 2000; // 2秒內相同通知只傳一次
@@ -34,6 +37,7 @@ public class NotificationService extends NotificationListenerService {
                 String ip = intent.getStringExtra("pc_ip");
                 if (ip != null && !ip.isEmpty()) {
                     pcHost = ip.trim();
+                    savePcIp(pcHost);
                     Log.d(TAG, "PC IP received: " + pcHost);
                 }
             }
@@ -41,6 +45,44 @@ public class NotificationService extends NotificationListenerService {
     };
 
     private ImageServer imageServer;
+
+    private void savePcIp(String ip) {
+        try {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString(KEY_PC_IP, ip).apply();
+        } catch (Throwable t) {
+            Log.w(TAG, "save pc_ip failed: " + t);
+        }
+    }
+
+    /**
+     * 服務被重建時（adb install -r、force-stop、系統回收後重啟 listener）記憶體裡的
+     * pcHost 會歸零，如果只等 Sync 下次連線廣播，中間所有通知都會被靜默丟掉——PC 端
+     * 完全沒動靜，看起來就像整個壞了。所以起來先把上次的 IP 撈回來。
+     *
+     * 以 SharedPreferences 為主（不需要任何權限）；沒有才退回 Sync 推上來的
+     * /sdcard/cb_pc_ip.txt——那是從舊版升上來、prefs 還是空的時候唯一的來源。
+     * IP 換了也不用擔心：Sync 每次連線都會重送廣播覆蓋掉。
+     */
+    private String loadPcIp() {
+        try {
+            String ip = getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getString(KEY_PC_IP, null);
+            if (ip != null && !ip.trim().isEmpty()) return ip.trim();
+        } catch (Throwable ignore) { }
+        java.io.BufferedReader r = null;
+        try {
+            r = new java.io.BufferedReader(new java.io.FileReader(IP_FILE));
+            String line = r.readLine();
+            if (line != null && !line.trim().isEmpty()) return line.trim();
+        } catch (Throwable ignore) {
+        } finally {
+            if (r != null) {
+                try { r.close(); } catch (Throwable ignore) { }
+            }
+        }
+        return null;
+    }
 
     // 平板獨立自啟：定期用 Shizuku 確保 clip agent 活著（取代 MacroDroid）
     private static final long AGENT_CHECK_MS = 60_000;
@@ -72,7 +114,10 @@ public class NotificationService extends NotificationListenerService {
         }
         // 開機後 Shizuku 可能還沒起來 → 先試一次，再每 60s 重試（冪等，去重靠看門狗）
         agentHandler.post(agentTick);
-        Log.d(TAG, "NotificationService started, waiting for PC IP...");
+        pcHost = loadPcIp();
+        Log.d(TAG, pcHost != null
+                ? "NotificationService started, PC IP restored: " + pcHost
+                : "NotificationService started, waiting for PC IP...");
     }
 
     @Override
