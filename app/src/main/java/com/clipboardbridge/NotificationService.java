@@ -74,7 +74,12 @@ public class NotificationService extends NotificationListenerService {
         try {
             r = new java.io.BufferedReader(new java.io.FileReader(IP_FILE));
             String line = r.readLine();
-            if (line != null && !line.trim().isEmpty()) return line.trim();
+            if (line != null && !line.trim().isEmpty()) {
+                String ip = line.trim();
+                // 順手存進 prefs：之後就不必再依賴這個檔案存在／儲存權限還在
+                savePcIp(ip);
+                return ip;
+            }
         } catch (Throwable ignore) {
         } finally {
             if (r != null) {
