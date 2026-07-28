@@ -97,7 +97,11 @@ public class NotificationService extends NotificationListenerService {
             Notification notification = sbn.getNotification();
             Bundle extras = notification.extras;
 
-            String title = extras.getString(Notification.EXTRA_TITLE, "");
+            // 一律用 getCharSequence：setContentTitle() 收的是 CharSequence，
+            // 有些 App（Spotify 的媒體通知）塞的是 SpannableString 而不是 String，
+            // 這時 getString() 會回傳預設值 → 標題整個變空的（歌名就是這樣掉的）。
+            CharSequence titleSeq = extras.getCharSequence(Notification.EXTRA_TITLE);
+            String title = titleSeq != null ? titleSeq.toString() : "";
             CharSequence textSeq = extras.getCharSequence(Notification.EXTRA_TEXT);
             String text = textSeq != null ? textSeq.toString() : "";
 
