@@ -698,6 +698,68 @@ public class ShotService extends AccessibilityService {
         return true;
     }
 
+    /**
+     * 全螢幕截圖，直接回 PNG bytes；失敗或逾時回 null。給 CommandServer 的
+     * shot 指令（遠端維護）用。
+     *
+     * 與 start()/trigger() 那條路的差別：**完全不叫遮罩、不等使用者互動**。
+     * 遠端下指令時平板旁邊通常沒人，跳出框選層只會卡在那裡直到逾時，而且會
+     * 蓋住同事正在用的畫面。也因此不碰 busy 旗標——它保護的是「同時只能有一
+     * 場框選」，和這裡無關，共用反而會讓遠端截圖被本地框選誤擋。
+     *
+     * 呼叫端必須在背景執行緒（這裡會 block 等 latch）。系統對 takeScreenshot
+     * 有頻率限制（約每秒一次），連續呼叫會拿到 onFailure。
+     */
+    static byte[] fullShot(int timeoutSec) {
+        final ShotService s = instance;
+        if (s == null) return null;
+        final byte[][] out = new byte[1][];
+        final CountDownLatch latch = new CountDownLatch(1);
+        try {
+            s.takeScreenshot(Display.DEFAULT_DISPLAY,
+                    Executors.newSingleThreadExecutor(),
+                    new TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(ScreenshotResult r) {
+                            try (HardwareBuffer hb = r.getHardwareBuffer()) {
+                                Bitmap raw = Bitmap.wrapHardwareBuffer(hb, r.getColorSpace());
+                                if (raw != null) {
+                                    // 硬體 bitmap 不能直接壓縮 → 先複製成軟體的
+                                    Bitmap bmp = raw.copy(Bitmap.Config.ARGB_8888, false);
+                                    raw.recycle();
+                                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                                    bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
+                                    bmp.recycle();
+                                    out[0] = bos.toByteArray();
+                                }
+                            } catch (Throwable e) {
+                                android.util.Log.e(TAG, "fullShot wrap failed: " + e);
+                            } finally {
+                                latch.countDown();
+                            }
+                        }
+
+                        @Override
+                        public void onFailure(int errorCode) {
+                            android.util.Log.e(TAG, "fullShot takeScreenshot failed " + errorCode);
+                            latch.countDown();
+                        }
+                    });
+        } catch (Throwable t) {
+            android.util.Log.e(TAG, "fullShot failed: " + t);
+            return null;
+        }
+        try {
+            if (!latch.await(timeoutSec, TimeUnit.SECONDS)) {
+                android.util.Log.w(TAG, "fullShot 逾時");
+                return null;
+            }
+        } catch (InterruptedException e) {
+            return null;
+        }
+        return out[0];
+    }
+
     // ── 游標下取字 ──────────────────────────────────────
     /**
      * 指令 8：直接把 (x,y) 那則訊息的整段文字寫進平板剪貼簿。

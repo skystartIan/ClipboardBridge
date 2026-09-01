@@ -102,19 +102,26 @@ final class AgentStarter {
               + "echo $! > \"$LOCK\"; echo STARTED";
     }
 
-    /** 用 Shizuku.newProcess 跑 sh -c，讀回第一行（STARTED/RUNNING/NODEX）。 */
+    /**
+     * 用 Shizuku.newProcess 起一個 sh -c。呼叫端負責讀取輸出與 destroy。
+     *
+     * 反射 + 明確包成 Object[]：varargs 會把 String[] 誤解成參數陣列本身。
+     */
+    private static Process newShell(String cmd) throws Throwable {
+        Method m = Shizuku.class.getDeclaredMethod(
+                "newProcess", String[].class, String[].class, String.class);
+        m.setAccessible(true);
+        Object proc = m.invoke(null, new Object[]{
+                new String[]{"sh", "-c", cmd}, null, null});
+        if (!(proc instanceof Process)) throw new IllegalStateException("not-a-process");
+        return (Process) proc;
+    }
+
+    /** 用 Shizuku 跑 sh -c，讀回第一行（STARTED/RUNNING/NODEX）。 */
     private static String runViaShizuku(String cmd) {
         Process p = null;
         try {
-            Method m = Shizuku.class.getDeclaredMethod(
-                    "newProcess", String[].class, String[].class, String.class);
-            m.setAccessible(true);
-            // 明確包成 Object[]，避免 varargs 把 String[] 誤解成參數陣列本身
-            Object proc = m.invoke(null, new Object[]{
-                    new String[]{"sh", "-c", cmd}, null, null});
-            if (!(proc instanceof Process)) return "ERR:not-a-process";
-            p = (Process) proc;
-
+            p = newShell(cmd);
             String firstLine = "";
             try (BufferedReader r = new BufferedReader(
                     new InputStreamReader(p.getInputStream()))) {
@@ -123,6 +130,54 @@ final class AgentStarter {
             }
             try { p.waitFor(); } catch (InterruptedException ignore) {}
             return firstLine.isEmpty() ? "OK" : firstLine;
+        } catch (Throwable t) {
+            return "ERR:" + t;
+        } finally {
+            if (p != null) try { p.destroy(); } catch (Throwable ignore) {}
+        }
+    }
+
+    /**
+     * 跑任意 shell 並回傳完整輸出（給 CommandServer 的 shell / log 指令用）。
+     *
+     * 與 runViaShizuku 分開而不是加參數：那支是啟動看門狗的既有路徑，語意是
+     * 「只看第一行狀態字」，不該為了新用途改動它。
+     *
+     * stderr 用 2>&1 併進 stdout——Shizuku 的 newProcess 沒有 redirectErrorStream，
+     * 而遠端排錯時看不到錯誤訊息等於白做。輸出超過 maxBytes 就截斷並註記，
+     * 免得一個 logcat 手滑塞爆 socket。
+     */
+    static String runShell(String cmd, int maxBytes, int timeoutSec) {
+        Process p = null;
+        try {
+            p = newShell("( " + cmd + " ) 2>&1");
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            boolean truncated = false;
+            java.io.InputStream is = p.getInputStream();
+            int n;
+            while ((n = is.read(buf)) != -1) {
+                if (bos.size() + n > maxBytes) {
+                    bos.write(buf, 0, Math.max(0, maxBytes - bos.size()));
+                    truncated = true;
+                    break;
+                }
+                bos.write(buf, 0, n);
+            }
+            if (truncated) {
+                // 不能在這裡 waitFor：我們不再讀了，對方很快會卡在寫滿的 pipe 上，
+                // 等下去只會白白耗掉整個 timeout。直接收掉。
+                p.destroy();
+                return bos.toString("UTF-8")
+                        + "\n[輸出超過 " + maxBytes + " bytes，已截斷]";
+            }
+            try {
+                if (!p.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)) {
+                    p.destroy();
+                    return bos.toString("UTF-8") + "\n[逾時 " + timeoutSec + "s，已中止]";
+                }
+            } catch (InterruptedException ignore) { }
+            return bos.toString("UTF-8");
         } catch (Throwable t) {
             return "ERR:" + t;
         } finally {

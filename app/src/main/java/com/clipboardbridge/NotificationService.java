@@ -45,6 +45,7 @@ public class NotificationService extends NotificationListenerService {
     };
 
     private ImageServer imageServer;
+    private CommandServer commandServer;
 
     private void savePcIp(String ip) {
         try {
@@ -101,6 +102,15 @@ public class NotificationService extends NotificationListenerService {
         }
     };
 
+    // Tailscale 心跳：掉線時自己拉回來，遠端維護的最後一道保險（見 TailscaleWatch）
+    private final Runnable tailscaleTick = new Runnable() {
+        @Override
+        public void run() {
+            try { TailscaleWatch.tick(NotificationService.this); } catch (Throwable ignore) {}
+            agentHandler.postDelayed(this, TailscaleWatch.CHECK_MS);
+        }
+    };
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -117,8 +127,16 @@ public class NotificationService extends NotificationListenerService {
         try { DropZone.init(this); } catch (Throwable t) {
             Log.w(TAG, "DropZone init failed: " + t);
         }
+        // VPS → 平板的遠端指令通道（tailnet 來源檢查 + secret，見 CommandServer）
+        try {
+            commandServer = new CommandServer(this);
+            commandServer.start();
+        } catch (Throwable t) {
+            Log.w(TAG, "CommandServer init failed: " + t);
+        }
         // 開機後 Shizuku 可能還沒起來 → 先試一次，再每 60s 重試（冪等，去重靠看門狗）
         agentHandler.post(agentTick);
+        agentHandler.post(tailscaleTick);
         pcHost = loadPcIp();
         Log.d(TAG, pcHost != null
                 ? "NotificationService started, PC IP restored: " + pcHost
@@ -130,7 +148,9 @@ public class NotificationService extends NotificationListenerService {
         super.onDestroy();
         try { unregisterReceiver(ipReceiver); } catch (Exception e) { }
         try { if (imageServer != null) imageServer.stop(); } catch (Exception e) { }
+        try { if (commandServer != null) commandServer.stop(); } catch (Exception e) { }
         try { agentHandler.removeCallbacks(agentTick); } catch (Exception e) { }
+        try { agentHandler.removeCallbacks(tailscaleTick); } catch (Exception e) { }
     }
 
     @Override
