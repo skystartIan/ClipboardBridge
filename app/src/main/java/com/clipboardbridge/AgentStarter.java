@@ -149,8 +149,25 @@ final class AgentStarter {
      */
     static String runShell(String cmd, int maxBytes, int timeoutSec) {
         Process p = null;
+        Thread killer = null;
+        final AtomicBoolean timedOut = new AtomicBoolean(false);
         try {
             p = newShell("( " + cmd + " ) 2>&1");
+            // 逾時**不能**用 Process.waitFor(timeout, unit)：它的預設實作靠反覆呼叫
+            // exitValue() 並只捕捉 IllegalThreadStateException，而 Shizuku 的遠端
+            // process 在未結束時丟的是 IllegalArgumentException("process hasn't
+            // exited")，會直接穿透變成 ERR。改用看門狗執行緒：時間到就 destroy，
+            // 那會關掉 stdout，下面的讀取迴圈跟著結束。
+            final Process proc = p;
+            killer = new Thread(() -> {
+                try {
+                    Thread.sleep(timeoutSec * 1000L);
+                    timedOut.set(true);
+                    proc.destroy();
+                } catch (Throwable ignore) { }
+            }, "shell-timeout");
+            killer.setDaemon(true);
+            killer.start();
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
             byte[] buf = new byte[8192];
             boolean truncated = false;
@@ -171,16 +188,14 @@ final class AgentStarter {
                 return bos.toString("UTF-8")
                         + "\n[輸出超過 " + maxBytes + " bytes，已截斷]";
             }
-            try {
-                if (!p.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)) {
-                    p.destroy();
-                    return bos.toString("UTF-8") + "\n[逾時 " + timeoutSec + "s，已中止]";
-                }
-            } catch (InterruptedException ignore) { }
-            return bos.toString("UTF-8");
+            // 讀到 EOF 才走到這裡，所以無參數 waitFor 幾乎立刻回來
+            try { p.waitFor(); } catch (InterruptedException ignore) { }
+            String out = bos.toString("UTF-8");
+            return timedOut.get() ? out + "\n[逾時 " + timeoutSec + "s，已中止]" : out;
         } catch (Throwable t) {
             return "ERR:" + t;
         } finally {
+            if (killer != null) killer.interrupt();
             if (p != null) try { p.destroy(); } catch (Throwable ignore) {}
         }
     }
