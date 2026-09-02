@@ -32,6 +32,8 @@ final class TailscaleWatch {
     private static final int MISS_THRESHOLD = 3;
     /** 回復動作的冷卻時間。拉不起來時每 60 秒彈一次 Tailscale 是災難。 */
     private static final long RECOVER_COOLDOWN_MS = 10 * 60_000L;
+    /** 拉起後等多久再確認結果。實測 Tailscale 約 10 秒把隧道建回來。 */
+    private static final long VERIFY_DELAY_MS = 15_000L;
 
     private static final String TS_PKG = "com.tailscale.ipn";
 
@@ -98,10 +100,19 @@ final class TailscaleWatch {
                 lastRecover = now;
                 // monkey 帶 LAUNCHER category 是最不挑版本的叫醒方式：
                 // 不必知道 Tailscale 的 Activity 元件名（改版會變）。
-                String r = AgentStarter.runShell(
+                AgentStarter.runShell(
                         "monkey -p " + TS_PKG + " -c android.intent.category.LAUNCHER 1",
                         4096, 15);
-                Log.i(TAG, "TailscaleWatch: 已嘗試拉起 Tailscale → " + r.trim());
+                // **不要記 monkey 的輸出**：三星改過的 monkey 會把參數回顯到 stderr
+                // （"bash arg: -p" 之類），看起來像失敗，實際上指令是成功的。
+                // 2026-09-02 實測就因此誤判過一次。改成等一下再看實際結果——
+                // 這行 log 的用途是「在你看不到的失聯期間交代發生了什麼」，
+                // 訊息誤導就完全失去價值。
+                try { Thread.sleep(VERIFY_DELAY_MS); } catch (InterruptedException ignore) {}
+                String ip = tailnetIp();
+                Log.i(TAG, "TailscaleWatch: 已拉起 Tailscale，"
+                        + (VERIFY_DELAY_MS / 1000) + " 秒後 tailnet 位址＝"
+                        + (ip != null ? ip : "仍無（下次冷卻後再試）"));
             } catch (Throwable t) {
                 Log.e(TAG, "TailscaleWatch tick failed: " + t);
             } finally {
