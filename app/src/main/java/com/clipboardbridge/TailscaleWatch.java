@@ -109,10 +109,10 @@ final class TailscaleWatch {
                 // 這行 log 的用途是「在你看不到的失聯期間交代發生了什麼」，
                 // 訊息誤導就完全失去價值。
                 try { Thread.sleep(VERIFY_DELAY_MS); } catch (InterruptedException ignore) {}
-                String ip = tailnetIp();
+                String after = tailnetIp();
                 Log.i(TAG, "TailscaleWatch: 已拉起 Tailscale，"
                         + (VERIFY_DELAY_MS / 1000) + " 秒後 tailnet 位址＝"
-                        + (ip != null ? ip : "仍無（下次冷卻後再試）"));
+                        + (after != null ? after : "仍無（下次冷卻後再試）"));
             } catch (Throwable t) {
                 Log.e(TAG, "TailscaleWatch tick failed: " + t);
             } finally {
