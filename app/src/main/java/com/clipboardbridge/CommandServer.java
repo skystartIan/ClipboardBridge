@@ -47,6 +47,8 @@ class CommandServer {
     private static final int SHOT_TIMEOUT_S = 20;
     private static final int SHELL_TIMEOUT_S = 30;
     private static final int MAX_OUT_BYTES = 256 * 1024;
+    /** log 指令回傳的行數（已過濾成只剩本 App 的標籤）。 */
+    private static final int LOG_LINES = 400;
 
     // 錯誤碼（負數，與正常 payload 長度不會混淆）
     private static final int ERR_AUTH        = -1;  // secret 不對
@@ -253,9 +255,13 @@ class CommandServer {
                 if (!AgentStarter.shizukuReady()) { reply(out, ERR_NO_SHIZUKU); return; }
                 // filterspec 要寫 TAG:優先級，結尾 *:S 把其他標籤靜音。
                 // 不能寫成 TAG:*——* 不是合法的優先級，會被 logcat 當成語法錯誤。
+                //
+                // 也**不能**用 -t N：那是「取整個緩衝區最後 N 行」再套過濾，而平板上
+                // 其他 App 的日誌量遠大於我們，過濾完常常只剩一兩行（2026-09-02 實測
+                // -t 400 只回 1 行）。要讓 logcat 先過濾整個緩衝區，再自己 tail。
                 String text = AgentStarter.runShell(
-                        "logcat -d -t 400 " + ClipboardReceiver.TAG + ":V CBNotification:V "
-                                + AgentStarter.TAG + ":V *:S",
+                        "logcat -d " + ClipboardReceiver.TAG + ":V CBNotification:V "
+                                + AgentStarter.TAG + ":V *:S | tail -n " + LOG_LINES,
                         MAX_OUT_BYTES, SHELL_TIMEOUT_S);
                 replyJson(out, new JSONObject().put("ok", true).put("log", text));
                 return;
