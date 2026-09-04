@@ -564,7 +564,8 @@ class PunchWebView {
      * 上／下班別由伺服器的 `punchedType` 決定，不自己猜——猜錯會把下班打成上班，
      * 而那要人工去 HR 系統改。
      */
-    static JSONObject preview(Context ctx, String loc, String note) throws Exception {
+    static JSONObject preview(Context ctx, String loc, String note, int forceType)
+            throws Exception {
         JSONObject j = new JSONObject();
         if (!ensureWeb(ctx)) {
             return j.put("ok", false).put("error", "WebView 建立失敗");
@@ -586,6 +587,19 @@ class PunchWebView {
         if (pt.has("error")) j.put("punched_type_error", pt.optString("error"));
         int wt = workTypeFrom(pt);
         j.put("work_type", wt);
+
+        // 使用者按「改打上班／改打下班」時，以他指定的為準——伺服器判斷偶爾
+        // 會跟現實不符（例如忘了打上班卡），那時人比機器清楚。
+        if (forceType == 1 || forceType == 2) {
+            j.put("forced", true);
+            JSONObject L0 = location(loc);
+            JSONObject body0 = buildBody(L0, forceType, note);
+            JSONObject meta0 = buildMeta(loc, L0, forceType).put("forced", true);
+            PunchPending.write(ctx, body0, meta0);
+            return j.put("ok", true).put("meta", meta0).put("body", body0)
+                    .put("ttl_min", PunchPending.TTL_MS / 60000);
+        }
+
         if (wt == 3) {
             return j.put("ok", false).put("stage", "done")
                     .put("error", "今天的上班與下班都已經打完了，不需要再打。");
@@ -598,21 +612,8 @@ class PunchWebView {
         int atype = wt;          // WorkType 直接就是 AttendanceType
 
         JSONObject L = location(loc);
-        JSONObject body = new JSONObject()
-                .put("Latitude", L.getDouble("lat"))
-                .put("Longitude", L.getDouble("lng"))
-                .put("AttendanceType", atype)
-                .put("PunchesLocationId", L.getString("locid"))
-                .put("LocationDetails", note == null ? "" : note)
-                .put("IdentifyCode", UUID.randomUUID().toString().toUpperCase())
-                .put("IsOverride", false)
-                .put("gpstype", "TW");
-
-        JSONObject meta = new JSONObject()
-                .put("loc", loc == null ? "kh" : loc)
-                .put("loc_name", L.getString("name"))
-                .put("atype", atype)
-                .put("atype_name", atype == 1 ? "上班" : "下班");
+        JSONObject body = buildBody(L, atype, note);
+        JSONObject meta = buildMeta(loc, L, atype);
         PunchPending.write(ctx, body, meta);
 
         return j.put("ok", true).put("meta", meta).put("body", body)
@@ -658,6 +659,32 @@ class PunchWebView {
         } catch (Exception e) {
             return 0;
         }
+    }
+
+    /**
+     * 組出 `clockInOut/gps` 的 payload。純函式，不送出。
+     * 欄位與 `punch.py:140` 的 build_body 一致。
+     */
+    private static JSONObject buildBody(JSONObject L, int atype, String note)
+            throws Exception {
+        return new JSONObject()
+                .put("Latitude", L.getDouble("lat"))
+                .put("Longitude", L.getDouble("lng"))
+                .put("AttendanceType", atype)
+                .put("PunchesLocationId", L.getString("locid"))
+                .put("LocationDetails", note == null ? "" : note)
+                .put("IdentifyCode", UUID.randomUUID().toString().toUpperCase())
+                .put("IsOverride", false)
+                .put("gpstype", "TW");
+    }
+
+    private static JSONObject buildMeta(String loc, JSONObject L, int atype)
+            throws Exception {
+        return new JSONObject()
+                .put("loc", loc == null ? "kh" : loc)
+                .put("loc_name", L.getString("name"))
+                .put("atype", atype)
+                .put("atype_name", atype == 1 ? "上班" : "下班");
     }
 
     /** 送出待確認的打卡。**這是唯一會真的打卡的方法。** */

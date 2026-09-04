@@ -304,8 +304,10 @@ class CommandServer {
             case "punch_preview": {
                 // 產生待確認的打卡並回預覽，**不送出**。
                 s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
+                // force_type 1/2 = 使用者按了「改打上班／改打下班」，以他指定的為準
                 replyJson(out, PunchWebView.preview(context,
-                        req.optString("loc", "kh"), req.optString("note", "")));
+                        req.optString("loc", "kh"), req.optString("note", ""),
+                        req.optInt("force_type", 0)));
                 return;
             }
 
