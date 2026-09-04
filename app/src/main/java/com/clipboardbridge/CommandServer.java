@@ -331,8 +331,11 @@ class CommandServer {
                     reply(out, ERR_BAD_REQUEST);
                     return;
                 }
+                // MAYOHR 的 pt 端點沒帶 FunctionCode/ActionCode 會回 401
+                // SH_NoAuthorizationToAccess（是授權不是認證），所以要能自訂標頭。
+                JSONObject hs = req.optJSONObject("headers");
                 s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
-                replyJson(out, PunchWebView.get(context, u));
+                replyJson(out, PunchWebView.get(context, u, hs));
                 return;
             }
 

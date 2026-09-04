@@ -688,11 +688,11 @@ class PunchWebView {
      * **只允許 GET**，所以它不會造成任何變更——拿來試候選端點時不必擔心誤觸。
      * 有它才不用「猜一個端點就重建一次 APK」，那一輪要四分鐘。
      */
-    static JSONObject get(Context ctx, String url) throws Exception {
+    static JSONObject get(Context ctx, String url, JSONObject headers) throws Exception {
         if (!ensureWeb(ctx) || !ensureOnApollo()) {
             return new JSONObject().put("error", "WebView 未就緒");
         }
-        return apiFetch("GET", url, null, null).put("__url", url);
+        return apiFetch("GET", url, null, headers).put("__url", url);
     }
 
     /**
