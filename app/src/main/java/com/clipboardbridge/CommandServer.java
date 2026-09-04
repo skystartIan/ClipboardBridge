@@ -317,6 +317,13 @@ class CommandServer {
                 return;
             }
 
+            case "punch_net": {
+                // 診斷用：重載打卡頁並錄下它打了哪些 API，用來找出 BFF 真實端點。
+                s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
+                replyJson(out, PunchWebView.netLog(context));
+                return;
+            }
+
             case "punch_get": {
                 // 診斷用的唯讀探測。只允許 https 的 GET，不會造成任何變更。
                 String u = req.optString("url", "");

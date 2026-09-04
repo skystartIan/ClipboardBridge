@@ -12,10 +12,16 @@ import android.webkit.CookieManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebViewClient;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -106,6 +112,18 @@ class PunchWebView {
     /** 由 WebViewClient 在 onPageFinished 時倒數；每次 load 前換新的。 */
     private static volatile CountDownLatch pageLatch;
 
+    /**
+     * 診斷用的網路請求紀錄。
+     *
+     * 用 `shouldInterceptRequest` 在 Java 這側錄，而不是在 JS 裡 patch `fetch`：
+     * 後者一導頁就被清掉，而我們正是要看「載入打卡頁的過程中」打了哪些 API。
+     * 只留含 `/api/` 的，濾掉 js/css/圖片那些雜訊。
+     */
+    private static final List<String> NET_LOG =
+            Collections.synchronizedList(new ArrayList<>());
+    private static volatile boolean netRecording;
+    private static final int NET_LOG_MAX = 80;
+
     private PunchWebView() { }
 
     // ── 生命週期 ────────────────────────────────────────
@@ -137,6 +155,17 @@ class PunchWebView {
                     cm.setAcceptThirdPartyCookies(web, true);
 
                     web.setWebViewClient(new WebViewClient() {
+                        @Override public WebResourceResponse shouldInterceptRequest(
+                                WebView v, WebResourceRequest rq) {
+                            if (netRecording && rq != null && rq.getUrl() != null) {
+                                String u = rq.getUrl().toString();
+                                if (u.contains("/api/") && NET_LOG.size() < NET_LOG_MAX) {
+                                    NET_LOG.add(rq.getMethod() + " " + u);
+                                }
+                            }
+                            return null;   // 只是旁聽，不攔截
+                        }
+
                         @Override public void onPageFinished(WebView v, String url) {
                             Log.d(TAG, "PunchWebView 載入完成：" + url);
                             CountDownLatch l = pageLatch;
@@ -664,6 +693,27 @@ class PunchWebView {
             return new JSONObject().put("error", "WebView 未就緒");
         }
         return apiFetch("GET", url, null, null).put("__url", url);
+    }
+
+    /**
+     * 診斷用：重載打卡頁並錄下它打了哪些 API。
+     *
+     * 這是找出 BFF 真實端點的方法——與其猜路徑再等四分鐘建置，不如直接看
+     * 官方 SPA 自己呼叫什麼。全程唯讀：只是載入頁面並旁聽。
+     */
+    static JSONObject netLog(Context ctx) throws Exception {
+        if (!ensureWeb(ctx)) return new JSONObject().put("error", "WebView 未就緒");
+        NET_LOG.clear();
+        netRecording = true;
+        try {
+            load(APOLLO_URL);
+            Thread.sleep(12000);          // 讓 SPA 把該打的 API 都打完
+        } finally {
+            netRecording = false;
+        }
+        JSONArray arr = new JSONArray();
+        synchronized (NET_LOG) { for (String u : NET_LOG) arr.put(u); }
+        return new JSONObject().put("count", arr.length()).put("requests", arr);
     }
 
     /** 取消：清掉 pending。清掉後誤按確認也只會回「沒有待確認的打卡」。 */
