@@ -279,6 +279,28 @@ class CommandServer {
                 return;
             }
 
+            case "punch_set_creds": {
+                // 憑證只從這條 tailnet 通道送進來一次，之後就只活在平板的
+                // EncryptedSharedPreferences 裡。**回應絕不回傳任何憑證內容。**
+                String co = req.optString("company", "");
+                String no = req.optString("empno", "");
+                String pw = req.optString("password", "");
+                if (co.isEmpty() || no.isEmpty() || pw.isEmpty()) {
+                    reply(out, ERR_BAD_REQUEST);
+                    return;
+                }
+                PunchCreds.store(context, co, no, pw);
+                replyJson(out, new JSONObject().put("ok", true)
+                        .put("note", "憑證已加密存入平板（company=" + co + "）"));
+                return;
+            }
+
+            case "punch_login": {
+                s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
+                replyJson(out, PunchWebView.login(context));
+                return;
+            }
+
             case "punch_probe": {
                 // MAYOHR 打卡的唯讀健檢。**不會送出任何打卡**，只載入打卡頁再對
                 // clockInOut/useNew 發一次 GET。刻意不需要 Shizuku——整個打卡設計

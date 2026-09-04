@@ -253,21 +253,11 @@ class PunchWebView {
         // SPA 載完 onPageFinished 後還要跑一會兒才會轉址／渲染，給它一點時間
         Thread.sleep(3000);
 
-        String js =
-                "(async()=>{try{"
-              + "const r=await fetch(" + jsStr(PRECHECK_URL) + ",{credentials:'include'});"
-              + "const t=await r.text();"
-              + "window.__cbResult=JSON.stringify({status:r.status,len:t.length,"
-              + "body:t.slice(0,200),href:location.href,ua:navigator.userAgent});"
-              + "}catch(e){window.__cbResult=JSON.stringify({error:String(e),"
-              + "href:location.href,ua:navigator.userAgent});}})();";
-
-        String raw = runAsync(js, FETCH_TIMEOUT_MS);
-        if (raw == null) {
+        JSONObject r = precheck();
+        if (r.has("error") && !r.has("status")) {
             return j.put("ok", false).put("stage", "fetch")
-                    .put("error", "頁內 fetch 逾時（可能被 WAF 擋在挑戰頁）");
+                    .put("error", r.optString("error"));
         }
-        JSONObject r = new JSONObject(raw);
         j.put("ok", true);
         j.put("href", r.optString("href"));
         j.put("ua", r.optString("ua"));
@@ -350,8 +340,127 @@ class PunchWebView {
         return o;
     }
 
-    /** 把字串包成 JS 字面值。 */
+    /**
+     * 把字串包成 JS 字面值。
+     *
+     * 用 `JSONObject.quote` 而不是自己 replace：JSON 字串字面值同時也是合法的
+     * JS 字串字面值，而且控制字元、引號、反斜線它都處理好了。密碼裡有奇怪字元
+     * 時，自己兜的跳脫會產生語法錯誤的 JS——那種錯誤只會表現成「登入莫名失敗」。
+     */
     private static String jsStr(String s) {
-        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+        return JSONObject.quote(s == null ? "" : s);
+    }
+
+    // ── 登入 ────────────────────────────────────────────
+
+    /**
+     * 用保存在平板上的憑證登入一次。**失敗不重試**，並受每日次數上限保護。
+     *
+     * ★ 密碼只以 JS 字面值的形式進入 `eval()`，不會出現在回傳值、log 或例外訊息裡。
+     *   維護時請保持這條——`auto_login.py:143` 那行「expr 內含密碼，絕對不要 print」
+     *   的規定在這一側同樣適用。
+     */
+    static JSONObject login(Context ctx) throws Exception {
+        JSONObject j = new JSONObject();
+        if (!PunchCreds.has(ctx)) {
+            return j.put("ok", false).put("stage", "creds")
+                    .put("error", "平板上沒有存憑證，請先用 punch_set_creds 送進來");
+        }
+        if (PunchCreds.blocked(ctx)) {
+            return j.put("ok", false).put("stage", "blocked")
+                    .put("error", "今日已嘗試登入 " + PunchCreds.attemptsToday(ctx)
+                            + " 次（上限 " + PunchCreds.MAX_ATTEMPTS_PER_DAY
+                            + "），不再自動嘗試以免帳號被鎖。上次結果："
+                            + PunchCreds.lastResult(ctx));
+        }
+        if (!ensureWeb(ctx)) {
+            return j.put("ok", false).put("stage", "ensureWeb")
+                    .put("error", "WebView 建立或掛載失敗");
+        }
+        if (!load(LOGIN_URL)) {
+            PunchCreds.noteAttempt(ctx, "load-timeout");
+            return j.put("ok", false).put("stage", "load").put("error", "載入登入頁逾時");
+        }
+
+        // 等表單渲染。等不到就不要填——盲填會把值設到不存在的元素上然後靜默失敗。
+        int waited = 0;
+        while (waited < LOGIN_FORM_WAIT_MS) {
+            if ("1".equals(eval("document.querySelector('input[name=password]')?'1':'0'"))) break;
+            Thread.sleep(1500);
+            waited += 1500;
+        }
+        j.put("form_wait_ms", waited);
+
+        // 順便查清楚「記住我」到底是什麼元素。實測 input[type=checkbox] 數量是 0，
+        // 代表 auto_login.py:135 那段 remember.click() 從來沒有生效過。
+        j.put("remember_kind", eval(
+                "JSON.stringify([...document.querySelectorAll('*')]"
+              + ".filter(e=>e.children.length===0&&(e.textContent||'').trim()==='記住我')"
+              + ".slice(0,3).map(e=>e.tagName+'/'+(e.className||'-')+'/'"
+              + "+(e.parentElement?e.parentElement.tagName:'-')))"));
+
+        // 填表並送出。用 eval 取回傳值而不是 runAsync 輪詢全域變數——click 會
+        // 觸發導頁，導頁一發生 window.__cbResult 就沒了，輪詢會永遠等不到。
+        String fill =
+                "((c,e,p)=>{"
+              + "const set=(el,v)=>{"
+              + "const d=Object.getOwnPropertyDescriptor(el.constructor.prototype,'value');"
+              + "(d&&d.set?d.set:(x=>el.value=x)).call(el,v);"
+              + "el.dispatchEvent(new Event('input',{bubbles:true}));"
+              + "el.dispatchEvent(new Event('change',{bubbles:true}));};"
+              + "const q=n=>document.querySelector('input[name='+n+']');"
+              + "const cc=q('companyCode'),en=q('employeeNo'),pw=q('password');"
+              + "if(!cc||!en||!pw)return 'missing-fields';"
+              + "set(cc,c);set(en,e);set(pw,p);"
+              + "const btn=[...document.querySelectorAll('button[type=submit]')]"
+              + ".find(b=>b.offsetWidth||b.offsetHeight);"
+              + "if(!btn)return 'no-submit-button';"
+              + "btn.click();return 'submitted';})("
+              + jsStr(PunchCreds.company(ctx)) + ","
+              + jsStr(PunchCreds.empno(ctx)) + ","
+              + jsStr(PunchCreds.password(ctx)) + ")";
+
+        // 點下去會導頁，所以先換好 latch 再送出
+        CountDownLatch nav = new CountDownLatch(1);
+        pageLatch = nav;
+        String r = eval(fill);
+        j.put("submit", r == null ? "eval-failed" : r);
+        if (!"submitted".equals(r)) {
+            PunchCreds.noteAttempt(ctx, String.valueOf(r));
+            return j.put("ok", false).put("stage", "fill")
+                    .put("error", "填表失敗：" + r);
+        }
+        nav.await(PAGE_LOAD_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        Thread.sleep(4000);          // 導頁完還要讓 SPA 把 session 建起來
+
+        // 成敗**只用唯讀預檢判定**，不看網址也不看畫面：401 就是沒登入成功。
+        JSONObject after = precheck();
+        j.put("after", after);
+        boolean ok = after.optInt("status") == 200;
+        j.put("ok", ok);
+        if (ok) {
+            PunchCreds.resetAttempts(ctx);
+        } else {
+            PunchCreds.noteAttempt(ctx, "precheck-" + after.optInt("status"));
+            j.put("error", "送出後預檢仍未通過（HTTP " + after.optInt("status") + "）");
+        }
+        j.put("attempts_today", PunchCreds.attemptsToday(ctx));
+        return j;
+    }
+
+    /** 唯讀預檢，回 {status,len,body,href}。抽出來給 probe 與 login 共用。 */
+    private static JSONObject precheck() throws Exception {
+        String js =
+                "(async()=>{try{"
+              + "const r=await fetch(" + jsStr(PRECHECK_URL) + ",{credentials:'include'});"
+              + "const t=await r.text();"
+              + "window.__cbResult=JSON.stringify({status:r.status,len:t.length,"
+              + "body:t.slice(0,200),href:location.href,ua:navigator.userAgent});"
+              + "}catch(e){window.__cbResult=JSON.stringify({error:String(e),"
+              + "href:location.href,ua:navigator.userAgent});}})();";
+        String raw = runAsync(js, FETCH_TIMEOUT_MS);
+        return raw == null
+                ? new JSONObject().put("error", "預檢逾時")
+                : new JSONObject(raw);
     }
 }

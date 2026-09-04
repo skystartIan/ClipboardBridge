@@ -52,4 +52,7 @@ dependencies {
     implementation 'dev.rikka.shizuku:provider:13.1.5'
     // Hidden API bypass
     implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'
+    // Apollo 登入憑證的加密儲存（EncryptedSharedPreferences，背後是 Android Keystore）。
+    // 不自己用 Cipher 兜 AES/GCM：IV 管理這種地方寫錯不會報錯，只會安靜地不安全。
+    implementation 'androidx.security:security-crypto:1.0.0'
 }
