@@ -46,6 +46,8 @@ class CommandServer {
     /** shot 要等 takeScreenshot 回來，比一般指令寬鬆。 */
     private static final int SHOT_TIMEOUT_S = 20;
     private static final int SHELL_TIMEOUT_S = 30;
+    /** 打卡類指令要等 WebView 載頁 + 頁內 fetch，比 shot 還久。 */
+    private static final int PUNCH_TIMEOUT_S = 120;
     private static final int MAX_OUT_BYTES = 256 * 1024;
     /** log 指令回傳的行數（已過濾成只剩本 App 的標籤）。 */
     private static final int LOG_LINES = 400;
@@ -274,6 +276,16 @@ class CommandServer {
                 s.setSoTimeout((SHELL_TIMEOUT_S + 10) * 1000);
                 String o = AgentStarter.runShell(script, MAX_OUT_BYTES, SHELL_TIMEOUT_S);
                 replyJson(out, new JSONObject().put("ok", true).put("out", o));
+                return;
+            }
+
+            case "punch_probe": {
+                // MAYOHR 打卡的唯讀健檢。**不會送出任何打卡**，只載入打卡頁再對
+                // clockInOut/useNew 發一次 GET。刻意不需要 Shizuku——整個打卡設計
+                // 就是要避開「重開機後要有人點一次 Shizuku」那個單點。
+                s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
+                JSONObject r = PunchWebView.probe(context);
+                replyJson(out, r);
                 return;
             }
 
