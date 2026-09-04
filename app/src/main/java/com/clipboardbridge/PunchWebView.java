@@ -16,6 +16,7 @@ import android.webkit.WebViewClient;
 
 import org.json.JSONObject;
 
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -53,6 +54,14 @@ class PunchWebView {
     /** 唯讀預檢：只問「這組憑證打卡服務認不認」，不會打卡。 */
     private static final String PRECHECK_URL =
             "https://apollo.mayohr.com/backend/platform-bff/api/clockInOut/useNew";
+
+    /** ★ 唯一會真的打卡的端點。除了 confirm() 之外沒有任何地方該碰它。 */
+    private static final String GPS_URL =
+            "https://apollo.mayohr.com/backend/platform-bff/api/clockInOut/gps";
+
+    /** 唯讀：問伺服器目前已打過的類型，用來決定這次該打上班還是下班。 */
+    private static final String PTYPE_URL =
+            "https://pt-be.mayohr.com/api/checkin/punchedType";
 
     /**
      * 登入頁。`original_target` 讓它登完自己導回打卡頁，與 auto_login.py:10 同一組參數。
@@ -453,19 +462,180 @@ class PunchWebView {
         return j;
     }
 
-    /** 唯讀預檢，回 {status,len,body,href}。抽出來給 probe 與 login 共用。 */
-    private static JSONObject precheck() throws Exception {
+    /**
+     * 在**目前頁面裡**發一次 fetch，回 {status, body, href}。
+     *
+     * 一定要在 `apollo.mayohr.com` 的頁面上呼叫：httpOnly 的
+     * `__ModuleSessionCookie` 只有同源請求帶得上，Origin/Referer 也才會正確。
+     * 這就是整個設計不用 Java 發 HTTP 的原因。
+     */
+    private static JSONObject apiFetch(String method, String url,
+                                       String bodyJson, JSONObject headers)
+            throws Exception {
         String js =
                 "(async()=>{try{"
-              + "const r=await fetch(" + jsStr(PRECHECK_URL) + ",{credentials:'include'});"
-              + "const t=await r.text();"
+              + "const o={method:" + jsStr(method) + ",credentials:'include',"
+              + "headers:" + (headers == null ? "{}" : headers.toString()) + "};"
+              + (bodyJson == null ? "" : "o.body=" + jsStr(bodyJson) + ";")
+              + "const r=await fetch(" + jsStr(url) + ",o);const t=await r.text();"
               + "window.__cbResult=JSON.stringify({status:r.status,len:t.length,"
-              + "body:t.slice(0,200),href:location.href,ua:navigator.userAgent});"
+              + "body:t.slice(0,600),href:location.href,ua:navigator.userAgent});"
               + "}catch(e){window.__cbResult=JSON.stringify({error:String(e),"
               + "href:location.href,ua:navigator.userAgent});}})();";
         String raw = runAsync(js, FETCH_TIMEOUT_MS);
         return raw == null
-                ? new JSONObject().put("error", "預檢逾時")
+                ? new JSONObject().put("error", "頁內 fetch 逾時")
                 : new JSONObject(raw);
+    }
+
+    /** 唯讀預檢，回 {status,len,body,href}。抽出來給 probe / login / 打卡共用。 */
+    private static JSONObject precheck() throws Exception {
+        return apiFetch("GET", PRECHECK_URL, null, null);
+    }
+
+    /**
+     * 確保 WebView 停在 apollo 這個 origin 上——不然 fetch 會變跨源、cookie 帶不上。
+     * 已經在上面就不重載，省掉每次幾秒的等待。
+     */
+    private static boolean ensureOnApollo() throws Exception {
+        String href = eval("location.href");
+        if (href != null && href.startsWith("https://apollo.mayohr.com/")) return true;
+        if (!load(APOLLO_URL)) return false;
+        Thread.sleep(2500);
+        return true;
+    }
+
+    // ── 打卡 ────────────────────────────────────────────
+
+    /**
+     * 地點捷徑，值取自 `punch.py:45` 的 LOCATIONS（來源是 AppEnableList，半徑 200m）。
+     *
+     * 同事只會用到 `kh`；`other`(WFH) 保留著，之後要開給他只是鍵盤多一顆按鈕。
+     */
+    private static JSONObject location(String loc) throws Exception {
+        if ("other".equals(loc)) {
+            return new JSONObject().put("name", "其他(WFH)")
+                    .put("locid", "00000000-0000-0000-0000-000000000000")
+                    .put("lat", 22.64923338).put("lng", 120.30381738);
+        }
+        return new JSONObject().put("name", "高雄辦公室")
+                .put("locid", "b7ed61a6-4e98-4216-abf8-d58da8445b87")
+                .put("lat", 22.64923338).put("lng", 120.30381738);
+    }
+
+    /**
+     * 產生待確認的打卡，**不送出**。
+     *
+     * 上／下班別由伺服器的 `punchedType` 決定，不自己猜——猜錯會把下班打成上班，
+     * 而那要人工去 HR 系統改。
+     */
+    static JSONObject preview(Context ctx, String loc, String note) throws Exception {
+        JSONObject j = new JSONObject();
+        if (!ensureWeb(ctx)) {
+            return j.put("ok", false).put("error", "WebView 建立失敗");
+        }
+        if (!ensureOnApollo()) {
+            return j.put("ok", false).put("error", "載入打卡頁逾時");
+        }
+        JSONObject pc = precheck();
+        if (pc.optInt("status") != 200) {
+            return j.put("ok", false).put("stage", "auth")
+                    .put("precheck_status", pc.optInt("status"))
+                    .put("error", "憑證無效，需要先重新登入");
+        }
+
+        JSONObject pt = apiFetch("GET", PTYPE_URL, null, null);
+        j.put("punched_type_status", pt.optInt("status"));
+        j.put("punched_type_body", pt.optString("body"));
+        int atype = attendanceTypeFrom(pt);
+        if (atype == 0) {
+            return j.put("ok", false).put("stage", "punchedType")
+                    .put("error", "讀不出目前該打上班還是下班，未產生待確認項目");
+        }
+
+        JSONObject L = location(loc);
+        JSONObject body = new JSONObject()
+                .put("Latitude", L.getDouble("lat"))
+                .put("Longitude", L.getDouble("lng"))
+                .put("AttendanceType", atype)
+                .put("PunchesLocationId", L.getString("locid"))
+                .put("LocationDetails", note == null ? "" : note)
+                .put("IdentifyCode", UUID.randomUUID().toString().toUpperCase())
+                .put("IsOverride", false)
+                .put("gpstype", "TW");
+
+        JSONObject meta = new JSONObject()
+                .put("loc", loc == null ? "kh" : loc)
+                .put("loc_name", L.getString("name"))
+                .put("atype", atype)
+                .put("atype_name", atype == 1 ? "上班" : "下班");
+        PunchPending.write(ctx, body, meta);
+
+        return j.put("ok", true).put("meta", meta).put("body", body)
+                .put("ttl_min", PunchPending.TTL_MS / 60000);
+    }
+
+    /**
+     * 從 punchedType 的回應推出這次該打 1（上班）還是 2（下班）。
+     * 判斷不出來回 0——寧可不打，也不要打錯別。
+     */
+    private static int attendanceTypeFrom(JSONObject pt) {
+        if (pt.optInt("status") != 200) return 0;
+        String b = pt.optString("body", "");
+        // 伺服器回的是目前「已打過的」類型：已打上班(1) → 這次該打下班(2)，反之亦然
+        if (b.contains("\"Data\": 1") || b.contains("\"Data\":1")
+                || b.contains("\"data\": 1") || b.contains("\"data\":1")) return 2;
+        if (b.contains("\"Data\": 2") || b.contains("\"Data\":2")
+                || b.contains("\"data\": 2") || b.contains("\"data\":2")) return 1;
+        if (b.contains("\"Data\": 0") || b.contains("\"Data\":0")
+                || b.contains("\"data\": 0") || b.contains("\"data\":0")) return 1;
+        return 0;
+    }
+
+    /** 送出待確認的打卡。**這是唯一會真的打卡的方法。** */
+    static JSONObject confirm(Context ctx) throws Exception {
+        JSONObject j = new JSONObject();
+        JSONObject pend = PunchPending.read(ctx);
+        if (pend == null) {
+            return j.put("ok", false).put("stage", "pending")
+                    .put("error", "沒有待確認的打卡（可能已取消或超過 "
+                            + (PunchPending.TTL_MS / 60000) + " 分鐘）");
+        }
+        if (!ensureWeb(ctx) || !ensureOnApollo()) {
+            return j.put("ok", false).put("error", "WebView 尚未就緒");
+        }
+        JSONObject headers = new JSONObject()
+                .put("Content-Type", "application/json")
+                .put("FunctionCode", "APP-LocationCheckin")
+                .put("ActionCode", "Default");
+        JSONObject body = pend.getJSONObject("body");
+        JSONObject r = apiFetch("POST", GPS_URL, body.toString(), headers);
+
+        j.put("meta", pend.getJSONObject("meta"));
+        j.put("status", r.optInt("status"));
+        j.put("body", r.optString("body"));
+        boolean ok = r.optInt("status") == 200;
+        j.put("ok", ok);
+        // 不論成敗都清掉：成功不必留，失敗留著也只會讓人重按而送出兩次。
+        PunchPending.clear(ctx);
+        return j;
+    }
+
+    /** 取消：清掉 pending。清掉後誤按確認也只會回「沒有待確認的打卡」。 */
+    static JSONObject cancel(Context ctx) throws Exception {
+        boolean had = PunchPending.exists(ctx);
+        PunchPending.clear(ctx);
+        return new JSONObject().put("ok", true).put("had_pending", had);
+    }
+
+    /** 唯讀健檢：登入狀態、憑證有沒有存、今日登入嘗試次數、有無待確認項目。 */
+    static JSONObject diag(Context ctx) throws Exception {
+        JSONObject j = probe(ctx);
+        j.put("creds_stored", PunchCreds.has(ctx));
+        j.put("login_attempts_today", PunchCreds.attemptsToday(ctx));
+        j.put("login_last_result", PunchCreds.lastResult(ctx));
+        JSONObject pend = PunchPending.read(ctx);
+        j.put("pending", pend == null ? JSONObject.NULL : pend.getJSONObject("meta"));
+        return j;
     }
 }

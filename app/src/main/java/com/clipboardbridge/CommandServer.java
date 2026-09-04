@@ -301,6 +301,32 @@ class CommandServer {
                 return;
             }
 
+            case "punch_preview": {
+                // 產生待確認的打卡並回預覽，**不送出**。
+                s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
+                replyJson(out, PunchWebView.preview(context,
+                        req.optString("loc", "kh"), req.optString("note", "")));
+                return;
+            }
+
+            case "punch_confirm": {
+                // ★★ 這是整支 App 唯一會真的打卡的指令。★★
+                // 送出的是 pending 裡存好的 payload，與預覽看到的完全一致。
+                s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
+                replyJson(out, PunchWebView.confirm(context));
+                return;
+            }
+
+            case "punch_cancel":
+                replyJson(out, PunchWebView.cancel(context));
+                return;
+
+            case "punch_diag": {
+                s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
+                replyJson(out, PunchWebView.diag(context));
+                return;
+            }
+
             case "punch_probe": {
                 // MAYOHR 打卡的唯讀健檢。**不會送出任何打卡**，只載入打卡頁再對
                 // clockInOut/useNew 發一次 GET。刻意不需要 Shizuku——整個打卡設計
