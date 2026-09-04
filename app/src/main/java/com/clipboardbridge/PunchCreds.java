@@ -5,7 +5,7 @@ import android.content.SharedPreferences;
 import android.util.Log;
 
 import androidx.security.crypto.EncryptedSharedPreferences;
-import androidx.security.crypto.MasterKey;
+import androidx.security.crypto.MasterKeys;
 
 import java.util.Calendar;
 
@@ -46,13 +46,20 @@ class PunchCreds {
 
     private PunchCreds() { }
 
+    /**
+     * 用的是 security-crypto **1.0.0** 的 API：`MasterKeys` 是靜態工具、
+     * `create()` 的參數順序是 (fileName, alias, context, ...)。
+     *
+     * 帶 `MasterKey.Builder` 的新式寫法要 1.1.0-alpha 才有——憑證儲存不押在
+     * alpha 版上，所以維持 1.0.0。它標了 deprecated，但那只是為了推廣新 API，
+     * 功能與安全性沒有問題。改版本前請先確認這裡兩處都要跟著改。
+     */
+    @SuppressWarnings("deprecation")
     private static SharedPreferences prefs(Context ctx) throws Exception {
         Context app = ctx.getApplicationContext();
-        MasterKey key = new MasterKey.Builder(app)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build();
+        String alias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC);
         return EncryptedSharedPreferences.create(
-                app, FILE, key,
+                FILE, alias, app,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM);
     }
