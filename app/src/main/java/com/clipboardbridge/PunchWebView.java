@@ -544,9 +544,11 @@ class PunchWebView {
                     .put("error", "憑證無效，需要先重新登入");
         }
 
-        JSONObject pt = apiFetch("GET", PTYPE_URL, null, null);
+        JSONObject pt = punchedType();
+        j.put("punched_type_url", pt.optString("__url"));
         j.put("punched_type_status", pt.optInt("status"));
         j.put("punched_type_body", pt.optString("body"));
+        if (pt.has("error")) j.put("punched_type_error", pt.optString("error"));
         int atype = attendanceTypeFrom(pt);
         if (atype == 0) {
             return j.put("ok", false).put("stage", "punchedType")
@@ -573,6 +575,36 @@ class PunchWebView {
 
         return j.put("ok", true).put("meta", meta).put("body", body)
                 .put("ttl_min", PunchPending.TTL_MS / 60000);
+    }
+
+    /**
+     * 問伺服器目前已打過的類型。
+     *
+     * ⚠️ **不能直接打 `pt-be.mayohr.com`**：頁面在 `apollo.mayohr.com`，那是跨源，
+     * 瀏覽器會擋（實測 status=0＝fetch 自己就拋例外，不是 HTTP 錯誤）。
+     * `punch.py` 沒事是因為它從 Python 發，伺服器端沒有 CORS 限制。
+     *
+     * 打卡與預檢都走 `apollo.mayohr.com/backend/platform-bff/`——那是 BFF 代理，
+     * SPA 打自己這一側，由 BFF 去找後端。所以這裡依序試 BFF 的候選路徑，
+     * 最後才退回直連（留著是為了萬一哪天 CORS 開了）。
+     */
+    private static JSONObject punchedType() throws Exception {
+        String[] candidates = {
+            "https://apollo.mayohr.com/backend/platform-bff/api/checkin/punchedType",
+            "https://apollo.mayohr.com/backend/pt/api/checkin/punchedType",
+            "https://apollo.mayohr.com/api/checkin/punchedType",
+            PTYPE_URL,
+        };
+        JSONObject last = new JSONObject();
+        for (String u : candidates) {
+            JSONObject r = apiFetch("GET", u, null, null);
+            r.put("__url", u);
+            last = r;
+            if (r.optInt("status") == 200) return r;
+            Log.d(TAG, "punchedType 候選失敗 " + u + " → status="
+                    + r.optInt("status") + " err=" + r.optString("error", ""));
+        }
+        return last;
     }
 
     /**
@@ -619,6 +651,19 @@ class PunchWebView {
         // 不論成敗都清掉：成功不必留，失敗留著也只會讓人重按而送出兩次。
         PunchPending.clear(ctx);
         return j;
+    }
+
+    /**
+     * 診斷用：從打卡頁對指定網址發一次 GET，回 {status, body}。
+     *
+     * **只允許 GET**，所以它不會造成任何變更——拿來試候選端點時不必擔心誤觸。
+     * 有它才不用「猜一個端點就重建一次 APK」，那一輪要四分鐘。
+     */
+    static JSONObject get(Context ctx, String url) throws Exception {
+        if (!ensureWeb(ctx) || !ensureOnApollo()) {
+            return new JSONObject().put("error", "WebView 未就緒");
+        }
+        return apiFetch("GET", url, null, null).put("__url", url);
     }
 
     /** 取消：清掉 pending。清掉後誤按確認也只會回「沒有待確認的打卡」。 */

@@ -317,6 +317,18 @@ class CommandServer {
                 return;
             }
 
+            case "punch_get": {
+                // 診斷用的唯讀探測。只允許 https 的 GET，不會造成任何變更。
+                String u = req.optString("url", "");
+                if (u.isEmpty() || !u.startsWith("https://")) {
+                    reply(out, ERR_BAD_REQUEST);
+                    return;
+                }
+                s.setSoTimeout((PUNCH_TIMEOUT_S + 10) * 1000);
+                replyJson(out, PunchWebView.get(context, u));
+                return;
+            }
+
             case "punch_cancel":
                 replyJson(out, PunchWebView.cancel(context));
                 return;
