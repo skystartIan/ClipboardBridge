@@ -54,6 +54,17 @@ class PunchWebView {
     private static final String PRECHECK_URL =
             "https://apollo.mayohr.com/backend/platform-bff/api/clockInOut/useNew";
 
+    /**
+     * 登入頁。`original_target` 讓它登完自己導回打卡頁，與 auto_login.py:10 同一組參數。
+     *
+     * 注意這頁是 JS 渲染的：實測純 HTTP 抓回來只有 1052 bytes，裡面只有
+     * `__RequestVerificationToken`，三個帳密欄位是跑完 JS 才長出來的。
+     */
+    private static final String LOGIN_URL =
+            "https://asiaauth.mayohr.com/HRM/Account/Login"
+            + "?original_target=https%3A%2F%2Fapollo.mayohr.com%2Fta%3Fid%3Dwebpunch"
+            + "&lang=zh-tw";
+
     private static final int PAGE_LOAD_TIMEOUT_MS = 45_000;
     private static final int JS_EVAL_TIMEOUT_MS   = 10_000;
     /** 頁內 fetch 的等待上限。WAF 偶爾會插一段挑戰，給寬一點。 */
@@ -241,9 +252,6 @@ class PunchWebView {
         j.put("ok", true);
         j.put("href", r.optString("href"));
         j.put("ua", r.optString("ua"));
-        // 導到 asiaauth 就是沒登入；停在 apollo 才有機會是登入狀態
-        j.put("logged_in", r.optString("href").contains("apollo.mayohr.com")
-                && r.optInt("status") == 200);
         if (r.has("error")) {
             j.put("precheck_error", r.optString("error"));
         } else {
@@ -251,7 +259,54 @@ class PunchWebView {
             j.put("precheck_len", r.optInt("len"));
             j.put("precheck_body", r.optString("body"));
         }
+
+        // 登入與否**只看預檢的狀態碼**。未登入時它回的是乾淨的
+        // 401 {"data":"Invalid token!"}（2026-09-04 實測），這比比對網址可靠得多——
+        // SPA 不一定會轉址，實測未登入時 href 仍停在 apollo.mayohr.com。
+        boolean loggedIn = r.optInt("status") == 200;
+        j.put("logged_in", loggedIn);
+
+        // 沒登入才順便看登入頁的欄位還在不在。這是唯讀檢查，不需要任何憑證，
+        // 目的是確認 auto_login.py:131 那組 selector 在 WebView 裡仍然成立。
+        if (!loggedIn) j.put("login_form", loginFormShape());
         return j;
+    }
+
+    /**
+     * 唯讀：載入登入頁，回報三個帳密欄位在不在。**不填任何東西、不送出。**
+     *
+     * 欄位名沿用 `auto_login.py:131` 已在生產環境驗證過的
+     * `companyCode` / `employeeNo` / `password`。
+     */
+    private static JSONObject loginFormShape() throws Exception {
+        JSONObject o = new JSONObject();
+        if (!load(LOGIN_URL)) return o.put("error", "載入登入頁逾時");
+        Thread.sleep(4000);          // 表單是 JS 渲染的，等它長出來
+
+        String js =
+                "(()=>{try{"
+              + "const q=n=>document.querySelector('input[name='+n+']');"
+              + "const btn=[...document.querySelectorAll('button[type=submit]')]"
+              + ".filter(b=>b.offsetWidth||b.offsetHeight).length;"
+              + "window.__cbResult=JSON.stringify({href:location.href,"
+              + "companyCode:!!q('companyCode'),employeeNo:!!q('employeeNo'),"
+              + "password:!!q('password'),checkboxes:"
+              + "document.querySelectorAll('input[type=checkbox]').length,"
+              + "submit_buttons:btn});"
+              + "}catch(e){window.__cbResult=JSON.stringify({error:String(e)});}})();";
+
+        String raw = runAsync(js, JS_EVAL_TIMEOUT_MS);
+        if (raw == null) return o.put("error", "查詢登入頁欄位逾時");
+        JSONObject r = new JSONObject(raw);
+        o.put("href", r.optString("href"));
+        o.put("companyCode", r.optBoolean("companyCode"));
+        o.put("employeeNo", r.optBoolean("employeeNo"));
+        o.put("password", r.optBoolean("password"));
+        o.put("checkboxes", r.optInt("checkboxes"));
+        o.put("submit_buttons", r.optInt("submit_buttons"));
+        o.put("usable", r.optBoolean("companyCode") && r.optBoolean("employeeNo")
+                && r.optBoolean("password") && r.optInt("submit_buttons") > 0);
+        return o;
     }
 
     /** 把字串包成 JS 字面值。 */
