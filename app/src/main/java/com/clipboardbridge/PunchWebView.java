@@ -65,6 +65,25 @@ class PunchWebView {
             + "?original_target=https%3A%2F%2Fapollo.mayohr.com%2Fta%3Fid%3Dwebpunch"
             + "&lang=zh-tw";
 
+    /**
+     * **必須覆寫 UA，這不是選配的。**
+     *
+     * 2026-09-04 實測：用 WebView 預設 UA（含 `; wv` 標記）載入 asiaauth 登入頁，
+     * 拿回來的是一頁「下載 Google Chrome」的不支援訊息——`inputs_total=1`（只剩
+     * 那個 hidden 的 `__RequestVerificationToken`）、`forms=0`、`buttons=0`、
+     * `body_len=78`。登入頁會做瀏覽器偵測，`wv` 就是它認出 WebView 的依據。
+     *
+     * 分界很清楚：**API（apollo）不在意 UA**（同一次實測乖乖回了 401
+     * `Invalid token!`），**但登入頁（asiaauth）會擋**。
+     *
+     * 用的是 `punch.py:80` 網頁模式那組桌面 Chrome UA——它已經在 vm-windows 上
+     * 打卡成功過，是已知被接受的字串。附帶好處是伺服器會回桌面版版面，
+     * 與 `auto_login.py:131` 當初開發選擇器時的版面一致。
+     */
+    private static final String DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            + "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+
     private static final int PAGE_LOAD_TIMEOUT_MS = 45_000;
     private static final int JS_EVAL_TIMEOUT_MS   = 10_000;
     /** 頁內 fetch 的等待上限。WAF 偶爾會插一段挑戰，給寬一點。 */
@@ -103,9 +122,7 @@ class PunchWebView {
                     // Apollo 是 SPA，localStorage 少不了
                     st.setDomStorageEnabled(true);
                     st.setDatabaseEnabled(true);
-                    // 不覆寫 User-Agent：頁面與頁內 fetch 用同一個 UA 才一致。
-                    // punch.py 在「自己發 HTTP」時要偽造桌面 UA，是因為那不是真的
-                    // 瀏覽器；這裡是真的，反而不該騙。
+                    st.setUserAgentString(DESKTOP_UA);
                     CookieManager cm = CookieManager.getInstance();
                     cm.setAcceptCookie(true);
                     cm.setAcceptThirdPartyCookies(web, true);
