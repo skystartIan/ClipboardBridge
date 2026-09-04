@@ -439,6 +439,11 @@ class PunchWebView {
         boolean ok = after.optInt("status") == 200;
         j.put("ok", ok);
         if (ok) {
+            // 強制把 cookie 寫回磁碟。CookieManager 平常是定期才 flush 的，
+            // App 行程若在那之前被系統殺掉，剛拿到的 session 就沒了——那會
+            // 白白消耗每日登入額度，而且症狀是「明明剛登入過卻又要重登」。
+            new Handler(Looper.getMainLooper()).post(
+                    () -> CookieManager.getInstance().flush());
             PunchCreds.resetAttempts(ctx);
         } else {
             PunchCreds.noteAttempt(ctx, "precheck-" + after.optInt("status"));
