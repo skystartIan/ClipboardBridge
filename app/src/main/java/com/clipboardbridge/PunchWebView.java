@@ -65,9 +65,15 @@ class PunchWebView {
     private static final String GPS_URL =
             "https://apollo.mayohr.com/backend/platform-bff/api/clockInOut/gps";
 
-    /** 唯讀：問伺服器目前已打過的類型，用來決定這次該打上班還是下班。 */
+    /**
+     * 唯讀：問伺服器「下一次該打的是上班還是下班」。
+     *
+     * ⚠️ 走 BFF 而不是 `pt-be.mayohr.com` 直連——後者跨源，瀏覽器直接擋
+     * （實測 `TypeError: Failed to fetch`）。BFF 路徑是用 punch_net 錄下
+     * 官方 SPA 的實際呼叫後才確定的，猜不出來。
+     */
     private static final String PTYPE_URL =
-            "https://pt-be.mayohr.com/api/checkin/punchedType";
+            "https://apollo.mayohr.com/backend/pt/api/checkin/punchedType";
 
     /**
      * 登入頁。`original_target` 讓它登完自己導回打卡頁，與 auto_login.py:10 同一組參數。
@@ -578,11 +584,18 @@ class PunchWebView {
         j.put("punched_type_status", pt.optInt("status"));
         j.put("punched_type_body", pt.optString("body"));
         if (pt.has("error")) j.put("punched_type_error", pt.optString("error"));
-        int atype = attendanceTypeFrom(pt);
-        if (atype == 0) {
-            return j.put("ok", false).put("stage", "punchedType")
-                    .put("error", "讀不出目前該打上班還是下班，未產生待確認項目");
+        int wt = workTypeFrom(pt);
+        j.put("work_type", wt);
+        if (wt == 3) {
+            return j.put("ok", false).put("stage", "done")
+                    .put("error", "今天的上班與下班都已經打完了，不需要再打。");
         }
+        if (wt != 1 && wt != 2) {
+            return j.put("ok", false).put("stage", "punchedType")
+                    .put("error", "讀不出下次該打上班還是下班（WorkType=" + wt
+                            + "），未產生待確認項目");
+        }
+        int atype = wt;          // WorkType 直接就是 AttendanceType
 
         JSONObject L = location(loc);
         JSONObject body = new JSONObject()
@@ -618,39 +631,33 @@ class PunchWebView {
      * 最後才退回直連（留著是為了萬一哪天 CORS 開了）。
      */
     private static JSONObject punchedType() throws Exception {
-        String[] candidates = {
-            "https://apollo.mayohr.com/backend/platform-bff/api/checkin/punchedType",
-            "https://apollo.mayohr.com/backend/pt/api/checkin/punchedType",
-            "https://apollo.mayohr.com/api/checkin/punchedType",
-            PTYPE_URL,
-        };
-        JSONObject last = new JSONObject();
-        for (String u : candidates) {
-            JSONObject r = apiFetch("GET", u, null, null);
-            r.put("__url", u);
-            last = r;
-            if (r.optInt("status") == 200) return r;
-            Log.d(TAG, "punchedType 候選失敗 " + u + " → status="
-                    + r.optInt("status") + " err=" + r.optString("error", ""));
-        }
-        return last;
+        // FunctionCode 用 PunchCard——這是 punch.py:102 已驗證的值。
+        // 不帶 FunctionCode 會回 401 SH_NoAuthorizationToAccess（授權錯誤，
+        // 不是認證錯誤：同一個 session 打 /fd/api/userInfo 是 200）。
+        JSONObject h = new JSONObject()
+                .put("FunctionCode", "PunchCard").put("ActionCode", "Default");
+        return apiFetch("GET", PTYPE_URL, null, h).put("__url", PTYPE_URL);
     }
 
     /**
-     * 從 punchedType 的回應推出這次該打 1（上班）還是 2（下班）。
-     * 判斷不出來回 0——寧可不打，也不要打錯別。
+     * 取出 `Data.WorkType`。
+     *
+     * ★ **WorkType 直接就是 AttendanceType，不要反轉。** `punch.py:98` 寫得很明確：
+     *   `{1: "下次打上班", 2: "下次打下班", 3: "今日上下班已完成(無待打)"}`
+     *   而 `punch.py:193` 是 `atype = wt`。
+     *   本方法一度寫成「已打過的類型」而做了反轉，那會讓每次打卡的上下班別都相反。
+     *
+     * 讀不出來回 0——寧可不打，也不要打錯別，那要人工去 HR 系統改。
      */
-    private static int attendanceTypeFrom(JSONObject pt) {
+    private static int workTypeFrom(JSONObject pt) {
         if (pt.optInt("status") != 200) return 0;
-        String b = pt.optString("body", "");
-        // 伺服器回的是目前「已打過的」類型：已打上班(1) → 這次該打下班(2)，反之亦然
-        if (b.contains("\"Data\": 1") || b.contains("\"Data\":1")
-                || b.contains("\"data\": 1") || b.contains("\"data\":1")) return 2;
-        if (b.contains("\"Data\": 2") || b.contains("\"Data\":2")
-                || b.contains("\"data\": 2") || b.contains("\"data\":2")) return 1;
-        if (b.contains("\"Data\": 0") || b.contains("\"Data\":0")
-                || b.contains("\"data\": 0") || b.contains("\"data\":0")) return 1;
-        return 0;
+        try {
+            JSONObject data = new JSONObject(pt.optString("body", "{}"))
+                    .optJSONObject("Data");
+            return data == null ? 0 : data.optInt("WorkType", 0);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /** 送出待確認的打卡。**這是唯一會真的打卡的方法。** */
