@@ -70,6 +70,8 @@ class PunchWebView {
     /** 頁內 fetch 的等待上限。WAF 偶爾會插一段挑戰，給寬一點。 */
     private static final int FETCH_TIMEOUT_MS     = 30_000;
     private static final int POLL_INTERVAL_MS     = 400;
+    /** 登入頁的表單是 JS 渲染的，最多等這麼久讓它長出來。 */
+    private static final int LOGIN_FORM_WAIT_MS   = 20_000;
 
     private static WebView web;              // 只在主執行緒碰
     private static volatile boolean attached;
@@ -281,29 +283,51 @@ class PunchWebView {
     private static JSONObject loginFormShape() throws Exception {
         JSONObject o = new JSONObject();
         if (!load(LOGIN_URL)) return o.put("error", "載入登入頁逾時");
-        Thread.sleep(4000);          // 表單是 JS 渲染的，等它長出來
 
+        // 表單是 JS 渲染的，固定 sleep 猜不準——輪詢等 password 欄位出現。
+        // 等不到也不放棄，照樣把 DOM 現況 dump 回來，才有東西可以判斷是
+        // 「還沒渲染完」還是「結構跟桌面版不一樣」。
+        int waited = 0;
+        while (waited < LOGIN_FORM_WAIT_MS) {
+            String hit = eval("document.querySelector('input[name=password]')?'1':'0'");
+            if ("1".equals(hit)) break;
+            Thread.sleep(1500);
+            waited += 1500;
+        }
+        o.put("waited_ms", waited);
+
+        // 回報 DOM 現況而不只是布林值：欄位找不到時，這些數字才說得出原因
+        // （0 個 input＋短 body＝還沒渲染；有 iframe＝表單在框裡；有 input
+        //  但名字不同＝手機版結構不一樣）。
         String js =
                 "(()=>{try{"
-              + "const q=n=>document.querySelector('input[name='+n+']');"
-              + "const btn=[...document.querySelectorAll('button[type=submit]')]"
-              + ".filter(b=>b.offsetWidth||b.offsetHeight).length;"
+              + "const all=[...document.querySelectorAll('input')];"
+              + "const list=all.slice(0,12).map(i=>((i.getAttribute('name')||'-')"
+              + "+'/'+(i.id||'-')+'/'+(i.type||'-')));"
+              + "const q=n=>!!document.querySelector('input[name='+n+']');"
               + "window.__cbResult=JSON.stringify({href:location.href,"
-              + "companyCode:!!q('companyCode'),employeeNo:!!q('employeeNo'),"
-              + "password:!!q('password'),checkboxes:"
-              + "document.querySelectorAll('input[type=checkbox]').length,"
-              + "submit_buttons:btn});"
+              + "title:document.title,ready:document.readyState,"
+              + "inputs_total:all.length,inputs:list,"
+              + "iframes:document.querySelectorAll('iframe').length,"
+              + "forms:document.querySelectorAll('form').length,"
+              + "buttons:document.querySelectorAll('button').length,"
+              + "body_len:(document.body?document.body.innerText.length:0),"
+              + "body_head:(document.body?document.body.innerText.slice(0,120):''),"
+              + "companyCode:q('companyCode'),employeeNo:q('employeeNo'),"
+              + "password:q('password'),"
+              + "checkboxes:document.querySelectorAll('input[type=checkbox]').length,"
+              + "submit_buttons:[...document.querySelectorAll('button[type=submit]')]"
+              + ".filter(b=>b.offsetWidth||b.offsetHeight).length});"
               + "}catch(e){window.__cbResult=JSON.stringify({error:String(e)});}})();";
 
         String raw = runAsync(js, JS_EVAL_TIMEOUT_MS);
         if (raw == null) return o.put("error", "查詢登入頁欄位逾時");
         JSONObject r = new JSONObject(raw);
-        o.put("href", r.optString("href"));
-        o.put("companyCode", r.optBoolean("companyCode"));
-        o.put("employeeNo", r.optBoolean("employeeNo"));
-        o.put("password", r.optBoolean("password"));
-        o.put("checkboxes", r.optInt("checkboxes"));
-        o.put("submit_buttons", r.optInt("submit_buttons"));
+        for (String k : new String[]{"href", "title", "ready", "inputs_total", "inputs",
+                "iframes", "forms", "buttons", "body_len", "body_head",
+                "companyCode", "employeeNo", "password", "checkboxes", "submit_buttons"}) {
+            if (r.has(k)) o.put(k, r.get(k));
+        }
         o.put("usable", r.optBoolean("companyCode") && r.optBoolean("employeeNo")
                 && r.optBoolean("password") && r.optInt("submit_buttons") > 0);
         return o;
