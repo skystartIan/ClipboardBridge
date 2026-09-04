@@ -435,13 +435,6 @@ class PunchWebView {
         }
         j.put("form_wait_ms", waited);
 
-        // 順便查清楚「記住我」到底是什麼元素。實測 input[type=checkbox] 數量是 0，
-        // 代表 auto_login.py:135 那段 remember.click() 從來沒有生效過。
-        j.put("remember_kind", eval(
-                "JSON.stringify([...document.querySelectorAll('*')]"
-              + ".filter(e=>e.children.length===0&&(e.textContent||'').trim()==='記住我')"
-              + ".slice(0,3).map(e=>e.tagName+'/'+(e.className||'-')+'/'"
-              + "+(e.parentElement?e.parentElement.tagName:'-')))"));
 
         // 填表並送出。用 eval 取回傳值而不是 runAsync 輪詢全域變數——click 會
         // 觸發導頁，導頁一發生 window.__cbResult 就沒了，輪詢會永遠等不到。
@@ -456,6 +449,16 @@ class PunchWebView {
               + "const cc=q('companyCode'),en=q('employeeNo'),pw=q('password');"
               + "if(!cc||!en||!pw)return 'missing-fields';"
               + "set(cc,c);set(en,e);set(pw,p);"
+              // 「記住我」勾起來延長 session。它不是 input[type=checkbox]——整頁
+              // 一個 checkbox 都沒有；真實結構是 Font Awesome 圖示假扮的：
+              //   <a><svg data-icon="square"></svg><span>記住我</span></a>
+              // 可點的是外層 <a>，狀態讀 data-icon（square 未勾／check-square 已勾）。
+              // 一定要先判斷再點：無條件點會把預設已勾的情況反而取消掉。
+              + "const rs=[...document.querySelectorAll('a > span')]"
+              + ".find(x=>(x.textContent||'').trim()==='記住我');"
+              + "const rl=rs&&rs.parentElement,ri=rl&&rl.querySelector('svg');"
+              + "const ron=ri&&((ri.getAttribute('data-icon')||'').includes('check'));"
+              + "if(rl&&!ron)rl.click();"
               + "const btn=[...document.querySelectorAll('button[type=submit]')]"
               + ".find(b=>b.offsetWidth||b.offsetHeight);"
               + "if(!btn)return 'no-submit-button';"
