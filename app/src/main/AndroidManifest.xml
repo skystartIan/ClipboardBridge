@@ -18,6 +18,21 @@
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- 打卡要送真實座標（見 PunchGps）。同樣用 adb 授予一次，簽章固定不會掉：
+         adb shell pm grant com.clipboardbridge android.permission.ACCESS_FINE_LOCATION
+         adb shell pm grant com.clipboardbridge android.permission.ACCESS_COARSE_LOCATION
+         adb shell pm grant com.clipboardbridge android.permission.ACCESS_BACKGROUND_LOCATION
+
+         ⚠️ 刻意用 ACCESS_BACKGROUND_LOCATION，**不要**把 NotificationService 的
+         foregroundServiceType 加上 "location"。
+         Android 14+ 規定：宣告 location 型別的前景服務在**啟動時**若沒有
+         ACCESS_FINE_LOCATION 會丟 SecurityException——那會讓整個 ClipboardBridge
+         起不來，剪貼簿、截圖、打卡一起死。BACKGROUND_LOCATION 效果相同
+         （不限前景狀態都讀得到定位），而且完全不碰現有服務的啟動路徑。 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
     <application
         android:label="ClipboardBridge"
         android:icon="@mipmap/ic_launcher"

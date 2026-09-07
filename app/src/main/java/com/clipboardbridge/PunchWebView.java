@@ -547,18 +547,49 @@ class PunchWebView {
 
     /**
      * 地點捷徑，值取自 `punch.py:45` 的 LOCATIONS（來源是 AppEnableList，半徑 200m）。
+     * 這裡回的是**地點中心**；實際送出的座標會由 {@link #applyGps} 換成平板量到的定位。
      *
-     * 同事只會用到 `kh`；`other`(WFH) 保留著，之後要開給他只是鍵盤多一顆按鈕。
+     * <p>⚠️ <b>`other`(WFH) 目前刻意擋下。</b>
+     * 原本的寫法有 bug：locid 給了 WFH 的全零 ID，lat/lng 卻沿用**辦公室**座標，
+     * 送出去會是「地點=其他(WFH)、座標在辦公室」的自相矛盾資料。
+     * 要開放 WFH，<b>必須先取得該使用者本人的住家座標</b>——絕對不可以沿用
+     * 辦公室座標，也不可以借用別人的。在那之前寧可擋下來。
      */
     private static JSONObject location(String loc) throws Exception {
         if ("other".equals(loc)) {
-            return new JSONObject().put("name", "其他(WFH)")
-                    .put("locid", "00000000-0000-0000-0000-000000000000")
-                    .put("lat", 22.64923338).put("lng", 120.30381738);
+            throw new IllegalArgumentException(
+                    "WFH 尚未開放：需要先設定使用者本人的住家座標");
         }
         return new JSONObject().put("name", "高雄辦公室")
                 .put("locid", "b7ed61a6-4e98-4216-abf8-d58da8445b87")
                 .put("lat", 22.64923338).put("lng", 120.30381738);
+    }
+
+    /**
+     * 把 {@code L} 的 lat/lng 換成平板量到的真實定位。
+     *
+     * <p>拿不到合格定位就<b>原封不動</b>——退回地點中心座標照常打卡。人就在辦公室，
+     * 那個座標本來就是真的；定位只是讓它更精確，不是打卡的前提。
+     *
+     * <p>結果記在 L 的 {@code gps_source} / {@code gps_dist_m} / {@code gps_reason}，
+     * 由 {@link #buildMeta} 帶進 meta 給 bot 用（bot 會在退回固定座標時通知 owner）。
+     * <b>這三個欄位只進 meta，不進 payload</b>——送給 Apollo 的 body 結構必須
+     * 跟它期待的一模一樣。
+     */
+    private static void applyGps(Context ctx, JSONObject L) throws Exception {
+        PunchGps.Result r = PunchGps.get(ctx, L.getDouble("lat"), L.getDouble("lng"));
+        if (r.fix != null) {
+            L.put("lat", r.fix.getLatitude()).put("lng", r.fix.getLongitude());
+            L.put("gps_source", "gps")
+             .put("gps_dist_m", Math.round(r.distM))
+             .put("gps_provider", r.provider)
+             .put("gps_reason", "");
+        } else {
+            L.put("gps_source", "fixed")
+             .put("gps_dist_m", Math.round(r.distM))
+             .put("gps_provider", r.provider)
+             .put("gps_reason", r.reason);
+        }
     }
 
     /**
@@ -570,6 +601,13 @@ class PunchWebView {
     static JSONObject preview(Context ctx, String loc, String note, int forceType)
             throws Exception {
         JSONObject j = new JSONObject();
+        // 先擋掉不支援的地點，回一個乾淨的錯誤。
+        // 若讓 location() 丟例外，CommandServer 的外層 catch 只會記 log 不回覆，
+        // 客戶端拿到的是 EOF——那種錯誤訊息沒人查得下去。
+        if (loc != null && !loc.isEmpty() && !"kh".equals(loc)) {
+            return j.put("ok", false).put("stage", "loc")
+                    .put("error", "目前只開放高雄辦公室（WFH 需先設定本人住家座標）");
+        }
         if (!ensureWeb(ctx)) {
             return j.put("ok", false).put("error", "WebView 建立失敗");
         }
@@ -596,6 +634,7 @@ class PunchWebView {
         if (forceType == 1 || forceType == 2) {
             j.put("forced", true);
             JSONObject L0 = location(loc);
+            applyGps(ctx, L0);
             JSONObject body0 = buildBody(L0, forceType, note);
             JSONObject meta0 = buildMeta(loc, L0, forceType).put("forced", true);
             PunchPending.write(ctx, body0, meta0);
@@ -615,6 +654,7 @@ class PunchWebView {
         int atype = wt;          // WorkType 直接就是 AttendanceType
 
         JSONObject L = location(loc);
+        applyGps(ctx, L);
         JSONObject body = buildBody(L, atype, note);
         JSONObject meta = buildMeta(loc, L, atype);
         PunchPending.write(ctx, body, meta);
@@ -686,6 +726,11 @@ class PunchWebView {
         return new JSONObject()
                 .put("loc", loc == null ? "kh" : loc)
                 .put("loc_name", L.getString("name"))
+                // 定位結果只進 meta，不進 payload（見 applyGps）
+                .put("gps_source", L.optString("gps_source", "fixed"))
+                .put("gps_dist_m", L.optInt("gps_dist_m", -1))
+                .put("gps_provider", L.optString("gps_provider", ""))
+                .put("gps_reason", L.optString("gps_reason", ""))
                 .put("atype", atype)
                 .put("atype_name", atype == 1 ? "上班" : "下班");
     }
@@ -768,6 +813,22 @@ class PunchWebView {
         j.put("login_last_result", PunchCreds.lastResult(ctx));
         JSONObject pend = PunchPending.read(ctx);
         j.put("pending", pend == null ? JSONObject.NULL : pend.getJSONObject("meta"));
+
+        // 現在這一刻的定位狀況。
+        //
+        // ★ 這是唯一看得到定位有沒有壞的地方——同事的訊息刻意不顯示任何定位資訊，
+        //   定位若默默失效，只有 owner 從 /diag（或那則失效通知）才會發現。
+        //   唯讀：只量不寫，不會動到 pending。
+        try {
+            JSONObject kh = location("kh");
+            PunchGps.Result r = PunchGps.get(ctx, kh.getDouble("lat"), kh.getDouble("lng"));
+            j.put("gps_ok", r.fix != null)
+             .put("gps_dist_m", r.fix != null ? Math.round(r.distM) : -1)
+             .put("gps_provider", r.provider)
+             .put("gps_reason", r.reason);
+        } catch (Throwable t) {
+            j.put("gps_ok", false).put("gps_reason", "diag_" + t.getClass().getSimpleName());
+        }
         return j;
     }
 }
