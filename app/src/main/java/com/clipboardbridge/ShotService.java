@@ -113,9 +113,6 @@ public class ShotService extends AccessibilityService {
      */
     private static final boolean AUTO_IME_ON_RDP = false;
 
-    /** RDP 裡兩次放行的 Ctrl+Space 至少要隔這麼久（毫秒），見 onKeyEvent。 */
-    private static final long CTRL_SPACE_MIN_GAP_MS = 600;
-
     /** 三星鍵盤的 en_US 子類型 hash（`adb shell ime list -a` 查得）。 */
     private static final int SUBTYPE_EN_US = 65537;
     /** IME 的目前子類型（@hide 常數，只能寫字串）。寫它會真的讓 IME 切換語言。 */
@@ -179,8 +176,6 @@ public class ShotService extends AccessibilityService {
     private volatile Set<String> imePkgs = Collections.emptySet();
     /** imePkgs 上次重查的時刻（elapsedRealtime，0 ＝ 還沒查過）。 */
     private volatile long imePkgsAt = 0;
-    /** RDP 裡上一次「放行出去」的 Ctrl+Space 時刻（節流用，見 onKeyEvent）。 */
-    private long lastCtrlSpaceAt = 0;
     /** 是否正處於遠端桌面（用來做進出 RDP 的一次性切換，不是每個事件都做）。 */
     private boolean inRdp = false;
 
@@ -782,23 +777,7 @@ public class ShotService extends AccessibilityService {
         if (event.getKeyCode() == KeyEvent.KEYCODE_SPACE && event.isCtrlPressed()) {
             String pkg = currentPkg();
             if (PASSTHROUGH.contains(pkg)) {
-                // 遠端桌面：放行，讓下面的 Gboard／系統處理。
-                //
-                // 但要節流：**慢按**時 Gboard 自己把 Ctrl+Space 當中英切換吃掉
-                // （在 RDP 裡這是切 Gboard 中英的唯一方法——單按 Shift 會被透傳
-                // 給遠端，Gboard 收不到），**快速連按**則會漏給 Android 系統的
-                // 「切換到下一個輸入法」而跳到三星鍵盤，然後只能用滑鼠選回來。
-                // 所以 CTRL_SPACE_MIN_GAP_MS 內的第二次起直接吃掉：慢按行為
-                // 完全不變，連按被擋在這一層，系統拿不到就切不走。
-                if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                    long now = SystemClock.elapsedRealtime();
-                    if (now - lastCtrlSpaceAt < CTRL_SPACE_MIN_GAP_MS) {
-                        android.util.Log.d(TAG, "ShotService: Ctrl+Space 連按太快，"
-                                + "吃掉不放行（免得被系統切成三星鍵盤）");
-                        return true;
-                    }
-                    lastCtrlSpaceAt = now;
-                }
+                // 遠端桌面：Ctrl+Space 是要給遠端 Windows 切它自己的輸入法的
                 return false;
             }
             if (event.getAction() == KeyEvent.ACTION_DOWN) switchIme();
