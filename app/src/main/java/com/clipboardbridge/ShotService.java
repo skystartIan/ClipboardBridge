@@ -100,6 +100,19 @@ public class ShotService extends AccessibilityService {
     private static final String IME_SAMSUNG =
             "com.samsung.android.honeyboard/.service.HoneyBoardService";
 
+    /**
+     * 進出 RDP 時要不要自動換平板的輸入法。
+     *
+     * **預設關閉（2026-09-10）**：原本進 RDP 會強制切成三星鍵盤 en_US，用意是
+     * 讓平板端不組字、純透傳給遠端的微軟新注音。但實際使用起來是「一進 RDP
+     * 就被鎖死在三星鍵盤，選什麼都會被蓋掉」——程式在跟使用者搶控制權，而且
+     * 只要子類型寫入失敗（例如 WRITE_SECURE_SETTINGS 掉了）就會卡在三星
+     * **中文**，那是最糟的狀態：平板端照樣組字，遠端反而收不到乾淨的按鍵。
+     * 改成完全交給使用者自己選；要在 RDP 裡打中文就自己挑一個英文（不組字）
+     * 的鍵盤，中英切換用遠端的 Alt+Shift。要復原這個行為改成 true 即可。
+     */
+    private static final boolean AUTO_IME_ON_RDP = false;
+
     /** 三星鍵盤的 en_US 子類型 hash（`adb shell ime list -a` 查得）。 */
     private static final int SUBTYPE_EN_US = 65537;
     /** IME 的目前子類型（@hide 常數，只能寫字串）。寫它會真的讓 IME 切換語言。 */
@@ -658,6 +671,12 @@ public class ShotService extends AccessibilityService {
             }
         }
         inRdp = rdp;
+        if (!AUTO_IME_ON_RDP) {
+            // 只記錄，不動使用者的輸入法（見 AUTO_IME_ON_RDP 的說明）
+            android.util.Log.d(TAG, "ShotService: " + (rdp ? "進入" : "離開")
+                    + " RDP（事件來自 " + pkg + "）——不自動換輸入法");
+            return;
+        }
         if (rdp) {
             android.util.Log.d(TAG, "ShotService: 進入 RDP → 三星鍵盤 en_US"
                     + "（事件來自 " + pkg + "）");
