@@ -16,6 +16,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.StaticLayout;
 import android.text.TextPaint;
@@ -28,6 +29,8 @@ import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.inputmethod.InputMethodInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -36,6 +39,7 @@ import androidx.annotation.RequiresApi;
 
 import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -77,10 +81,17 @@ public class ShotService extends AccessibilityService {
     private static final Set<String> PASSTHROUGH = new HashSet<>(Arrays.asList(
             "com.microsoft.rdc.androidx"));      // Windows App（遠端桌面）
 
-    /** 這些只是暫時蓋上來的視窗，不代表使用者換了 App，不能拿來更新 topPkg。 */
+    /**
+     * 這些只是暫時蓋上來的視窗，不代表使用者換了 App，不能拿來更新 topPkg。
+     *
+     * ⚠ 輸入法**不要**寫在這裡（見 isTransientPkg 的動態清單）。原本這裡硬編了
+     * Gboard，漏掉三星鍵盤 → 進 RDP 時 applyIme 切成三星鍵盤，三星鍵盤自己的
+     * 視窗事件又被當成「使用者換 App 了」→ 判定離開 RDP → 切回 Gboard，變成
+     * 自己觸發自己的迴圈（logcat 看得到「進入 RDP」「離開 RDP」相隔 0.3 秒
+     * 成對出現）。硬編清單跟不上實際啟用了哪些輸入法，所以改成動態查。
+     */
     private static final Set<String> TRANSIENT = new HashSet<>(Arrays.asList(
-            "com.android.systemui",              // 通知欄／快捷面板
-            "com.google.android.inputmethod.latin"));   // Gboard
+            "com.android.systemui"));            // 通知欄／快捷面板
 
     /** Ctrl+Space 在這兩個輸入法之間切換（見 switchIme）。 */
     private static final String IME_GBOARD =
@@ -147,6 +158,10 @@ public class ShotService extends AccessibilityService {
     private ShotCallback pending;
     /** 目前前景 App 的套件名（由 typeWindowStateChanged 事件維護）。 */
     private volatile String topPkg = "";
+    /** 已啟用的所有輸入法套件名（動態查，見 isTransientPkg）。 */
+    private volatile Set<String> imePkgs = Collections.emptySet();
+    /** imePkgs 上次重查的時刻（elapsedRealtime，0 ＝ 還沒查過）。 */
+    private volatile long imePkgsAt = 0;
     /** 是否正處於遠端桌面（用來做進出 RDP 的一次性切換，不是每個事件都做）。 */
     private boolean inRdp = false;
 
@@ -179,7 +194,43 @@ public class ShotService extends AccessibilityService {
     protected void onServiceConnected() {
         instance = this;
         wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        refreshImePkgs();
         android.util.Log.d(TAG, "ShotService connected");
+    }
+
+    /** 重查「目前啟用了哪些輸入法」。查失敗就保留上一份，不要清空。 */
+    private void refreshImePkgs() {
+        imePkgsAt = SystemClock.elapsedRealtime();
+        try {
+            InputMethodManager imm =
+                    (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null) return;
+            List<InputMethodInfo> list = imm.getEnabledInputMethodList();
+            if (list == null || list.isEmpty()) return;
+            Set<String> s = new HashSet<>();
+            for (InputMethodInfo info : list) s.add(info.getPackageName());
+            imePkgs = s;
+            android.util.Log.d(TAG, "ShotService: 已啟用的輸入法 " + s);
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "ShotService: 查輸入法清單失敗: " + t);
+        }
+    }
+
+    /**
+     * 這個套件的視窗算不算「暫時蓋上來的」＝不能拿來判斷使用者換了 App。
+     *
+     * 系統 UI 走靜態清單；**所有已啟用的輸入法**走動態清單，這樣以後裝新輸入法
+     * 也不必回來改程式。不認識的套件最多每分鐘重查一次，涵蓋「剛啟用一套新
+     * 輸入法、服務還沒重啟」的空窗（查一次 IPC，頻率低到不影響按鍵延遲）。
+     */
+    private boolean isTransientPkg(String pkg) {
+        if (TRANSIENT.contains(pkg)) return true;
+        if (imePkgs.contains(pkg)) return true;
+        if (SystemClock.elapsedRealtime() - imePkgsAt > 60_000) {
+            refreshImePkgs();
+            return imePkgs.contains(pkg);
+        }
+        return false;
     }
 
     @Override
@@ -205,7 +256,7 @@ public class ShotService extends AccessibilityService {
         if (p == null) return;
         String pkg = p.toString();
         // 輸入法／通知欄蓋上來不算換 App；自己的框選遮罩更不算
-        if (TRANSIENT.contains(pkg) || getPackageName().equals(pkg)) return;
+        if (isTransientPkg(pkg) || getPackageName().equals(pkg)) return;
         topPkg = pkg;
         onForegroundChanged(pkg);
     }
@@ -597,7 +648,7 @@ public class ShotService extends AccessibilityService {
                 if (p != null) {
                     String pkg = p.toString();
                     // 輸入法／通知欄疊在上面時別採信，退回上一個真正的 App
-                    if (!TRANSIENT.contains(pkg) && !getPackageName().equals(pkg)) {
+                    if (!isTransientPkg(pkg) && !getPackageName().equals(pkg)) {
                         return pkg;
                     }
                 }
