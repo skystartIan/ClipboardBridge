@@ -202,35 +202,31 @@ public class ShotService extends AccessibilityService {
     /**
      * 重查「目前啟用了哪些輸入法」。查失敗就保留上一份，不要清空。
      *
-     * 主來源是 Settings 的 enabled_input_methods 字串，**不是**
-     * InputMethodManager.getEnabledInputMethodList()——後者實測回報不穩：
-     * 同一分鐘內 Gboard 時有時無，超注音（tw.chaozhuyin）更是從來不出現，
-     * 而 `settings get secure enabled_input_methods` 穩定回報全部四套。
-     * API 那條留著當補充，兩邊取聯集。
+     * 主來源是 getInputMethodList()＝**所有已安裝**的輸入法（公開 API、穩定）。
+     * 踩過的兩個坑：
+     *   · getEnabledInputMethodList()（已啟用）回報不穩——同一分鐘內 Gboard
+     *     時有時無，超注音（tw.chaozhuyin）從來不出現。
+     *   · 直接讀 Settings 的 enabled_input_methods 會被擋：那是隱藏設定，
+     *     SecurityException 說「only readable to apps with targetSdkVersion
+     *     <= 33」，這個限制看 targetSdk 不看權限，有 WRITE_SECURE_SETTINGS
+     *     也沒用。
+     * 用「已安裝」而不是「已啟用」反而更對：任何輸入法的視窗都不該被當成
+     * 使用者換了 App，跟它有沒有啟用無關。
      */
     private void refreshImePkgs() {
         imePkgsAt = SystemClock.elapsedRealtime();
         Set<String> s = new HashSet<>();
         try {
-            // 格式：pkg/service;subtype;subtype:pkg/service:...（@hide 常數，用字串）
-            String raw = Settings.Secure.getString(getContentResolver(),
-                    "enabled_input_methods");
-            if (raw != null) {
-                for (String entry : raw.split(":")) {
-                    int slash = entry.indexOf('/');
-                    if (slash > 0) s.add(entry.substring(0, slash));
-                }
-            }
-        } catch (Throwable t) {
-            android.util.Log.w(TAG, "ShotService: 讀 enabled_input_methods 失敗: " + t);
-        }
-        try {
             InputMethodManager imm =
                     (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
             if (imm != null) {
-                List<InputMethodInfo> list = imm.getEnabledInputMethodList();
-                if (list != null) {
-                    for (InputMethodInfo info : list) s.add(info.getPackageName());
+                List<InputMethodInfo> all = imm.getInputMethodList();
+                if (all != null) {
+                    for (InputMethodInfo info : all) s.add(info.getPackageName());
+                }
+                List<InputMethodInfo> on = imm.getEnabledInputMethodList();
+                if (on != null) {
+                    for (InputMethodInfo info : on) s.add(info.getPackageName());
                 }
             }
         } catch (Throwable t) {
@@ -238,7 +234,7 @@ public class ShotService extends AccessibilityService {
         }
         if (s.isEmpty()) return;
         imePkgs = s;
-        android.util.Log.d(TAG, "ShotService: 已啟用的輸入法 " + s);
+        android.util.Log.d(TAG, "ShotService: 輸入法套件 " + s);
     }
 
     /**
