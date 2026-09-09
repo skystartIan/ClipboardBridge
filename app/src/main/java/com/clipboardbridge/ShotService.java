@@ -29,6 +29,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
@@ -198,22 +199,72 @@ public class ShotService extends AccessibilityService {
         android.util.Log.d(TAG, "ShotService connected");
     }
 
-    /** 重查「目前啟用了哪些輸入法」。查失敗就保留上一份，不要清空。 */
+    /**
+     * 重查「目前啟用了哪些輸入法」。查失敗就保留上一份，不要清空。
+     *
+     * 主來源是 Settings 的 enabled_input_methods 字串，**不是**
+     * InputMethodManager.getEnabledInputMethodList()——後者實測回報不穩：
+     * 同一分鐘內 Gboard 時有時無，超注音（tw.chaozhuyin）更是從來不出現，
+     * 而 `settings get secure enabled_input_methods` 穩定回報全部四套。
+     * API 那條留著當補充，兩邊取聯集。
+     */
     private void refreshImePkgs() {
         imePkgsAt = SystemClock.elapsedRealtime();
+        Set<String> s = new HashSet<>();
+        try {
+            // 格式：pkg/service;subtype;subtype:pkg/service:...（@hide 常數，用字串）
+            String raw = Settings.Secure.getString(getContentResolver(),
+                    "enabled_input_methods");
+            if (raw != null) {
+                for (String entry : raw.split(":")) {
+                    int slash = entry.indexOf('/');
+                    if (slash > 0) s.add(entry.substring(0, slash));
+                }
+            }
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "ShotService: 讀 enabled_input_methods 失敗: " + t);
+        }
         try {
             InputMethodManager imm =
                     (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-            if (imm == null) return;
-            List<InputMethodInfo> list = imm.getEnabledInputMethodList();
-            if (list == null || list.isEmpty()) return;
-            Set<String> s = new HashSet<>();
-            for (InputMethodInfo info : list) s.add(info.getPackageName());
-            imePkgs = s;
-            android.util.Log.d(TAG, "ShotService: 已啟用的輸入法 " + s);
+            if (imm != null) {
+                List<InputMethodInfo> list = imm.getEnabledInputMethodList();
+                if (list != null) {
+                    for (InputMethodInfo info : list) s.add(info.getPackageName());
+                }
+            }
         } catch (Throwable t) {
             android.util.Log.w(TAG, "ShotService: 查輸入法清單失敗: " + t);
         }
+        if (s.isEmpty()) return;
+        imePkgs = s;
+        android.util.Log.d(TAG, "ShotService: 已啟用的輸入法 " + s);
+    }
+
+    /**
+     * 目前真正持有輸入焦點的 App 套件名（拿不到回傳 null）。
+     *
+     * 用途＝二次確認。視窗切換事件只說「某個視窗變動了」，拿它當「使用者換
+     * App 了」會誤判（輸入法、浮動視窗都會送事件）。getWindows() 問的是系統
+     * 當下的實況，靠 flagRetrieveInteractiveWindows（shot_service.xml 已開）。
+     */
+    private String focusedAppPkg() {
+        try {
+            List<AccessibilityWindowInfo> ws = getWindows();
+            if (ws == null) return null;
+            for (AccessibilityWindowInfo w : ws) {
+                if (w == null || !w.isFocused()) continue;
+                if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+                AccessibilityNodeInfo r = w.getRoot();
+                if (r == null) continue;
+                CharSequence p = r.getPackageName();
+                try { r.recycle(); } catch (Throwable ignore) { }
+                if (p != null) return p.toString();
+            }
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "ShotService: 查焦點視窗失敗: " + t);
+        }
+        return null;
     }
 
     /**
@@ -599,12 +650,25 @@ public class ShotService extends AccessibilityService {
     private void onForegroundChanged(String pkg) {
         boolean rdp = PASSTHROUGH.contains(pkg);
         if (rdp == inRdp) return;
+        if (!rdp) {
+            // 二次確認：事件說換 App 了，但系統的焦點其實可能還在 RDP。這種假的
+            // 「離開」會把輸入法切回 Gboard，人明明還在 RDP 裡卻被換掉（實測
+            // 「進入 RDP」後 2.8 秒就跟著一筆「離開 RDP」，焦點全程沒離開）。
+            String focused = focusedAppPkg();
+            if (focused != null && PASSTHROUGH.contains(focused)) {
+                android.util.Log.d(TAG, "ShotService: 忽略假的離開 RDP"
+                        + "（事件來自 " + pkg + "，焦點仍在 " + focused + "）");
+                return;
+            }
+        }
         inRdp = rdp;
         if (rdp) {
-            android.util.Log.d(TAG, "ShotService: 進入 RDP → 三星鍵盤 en_US");
+            android.util.Log.d(TAG, "ShotService: 進入 RDP → 三星鍵盤 en_US"
+                    + "（事件來自 " + pkg + "）");
             applyIme(IME_SAMSUNG, SUBTYPE_EN_US);
         } else {
-            android.util.Log.d(TAG, "ShotService: 離開 RDP → Gboard（沿用上次語言）");
+            android.util.Log.d(TAG, "ShotService: 離開 RDP → Gboard（去了 "
+                    + pkg + "，沿用上次語言）");
             applyIme(IME_GBOARD, 0);   // 0 ＝ 不寫子類型，讓系統從歷史還原
         }
     }
