@@ -1046,10 +1046,14 @@ public class ShotService extends AccessibilityService {
         shot = bmp;
         try {
             view = new SelectView(this);
+            // 用無障礙服務專用的遮罩類型（跟選字層一樣），不用 APPLICATION_OVERLAY：
+            // 有 App 設了 HIDE_NON_SYSTEM_OVERLAY_WINDOWS（例如 HyRead 電子書開在分割畫面）時，
+            // 系統會把所有 APPLICATION_OVERLAY 強制隱藏 → 框選遮罩看不到、45 秒後逾時
+            // （2026-09-15 實測 mIsForceHiddenNonSystemOverlayWindow=true）。無障礙遮罩不受這個限制。
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.TRANSLUCENT);
