@@ -20,8 +20,12 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      # 預設會裝 "tools platform-tools"，但 runner 的 cmdline-tools 16.0 已經沒有 "tools"
+      # （2026-09-15 起 sdkmanager 直接失敗）→ 只裝 platform-tools，其餘由 Gradle 自己下載
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
       - name: Install Gradle
         uses: gradle/actions/setup-gradle@v3
