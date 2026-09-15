@@ -244,6 +244,12 @@ class DropZone {
      */
     private static boolean isTextOnly(ClipDescription d) {
         if (d == null || d.getMimeTypeCount() == 0) return false;
+        // 文字「檔案」也是 text/ 開頭（My Files 拖 .md＝text/markdown，.txt＝text/plain），光看 MIME
+        // 會把它當成選字而整場忽略（2026-09-15 使用者回報 .md 拖不過去）。檔案總管拖檔會帶標籤
+        // （logcat：text/markdown hasLabel(11) hasExtras）；選字拖曳是系統 TextView 發的
+        // ClipData.newPlainText(null, …)，沒有標籤 → 有標籤就當檔案。
+        CharSequence label = d.getLabel();
+        if (label != null && label.length() > 0) return false;
         for (int i = 0; i < d.getMimeTypeCount(); i++) {
             String m = d.getMimeType(i);
             if (m == null) continue;
