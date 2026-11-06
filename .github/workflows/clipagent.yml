@@ -24,6 +24,9 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        # 新版 cmdline-tools 已無 "tools" 套件，預設值會讓 sdkmanager 直接失敗（同 build.yml）
+        with:
+          packages: 'platform-tools'
 
       - name: Install platform + build-tools
         run: |
