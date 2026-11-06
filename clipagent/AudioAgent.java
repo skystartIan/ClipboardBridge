@@ -40,6 +40,9 @@ public final class AudioAgent {
     private static final int CHUNK = 10 * BYTES_PER_MS;            // 每次讀寫 10 ms
     private static final int MAX_BACKLOG_MS = 120;
     private static final int TARGET_BACKLOG_MS = 30;
+    // AudioTrack 實際配到的緩衝常常是 128 ms（6144 frames）；寫入是阻塞的，緩衝會被填滿，
+    // 等於固定多 128 ms 延遲。建好後把「有效緩衝」縮到這個長度。
+    private static final int TRACK_BUFFER_MS = 40;
 
     public static void main(String[] args) {
         int port = 27230;
@@ -60,7 +63,8 @@ public final class AudioAgent {
                 return;
             }
         }
-        out("AUDRDY:port=" + port + " buffer=" + track.getBufferSizeInFrames() + "f");
+        out("AUDRDY:port=" + port + " buffer=" + track.getBufferSizeInFrames() + "f"
+                + " capacity=" + (Build.VERSION.SDK_INT >= 24 ? track.getBufferCapacityInFrames() : -1) + "f");
 
         try (ServerSocket ss = new ServerSocket()) {
             ss.setReuseAddress(true);
@@ -114,6 +118,9 @@ public final class AudioAgent {
         if (t.getState() != AudioTrack.STATE_INITIALIZED) {
             t.release();
             throw new IllegalStateException("AudioTrack not initialized");
+        }
+        if (Build.VERSION.SDK_INT >= 24) {
+            t.setBufferSizeInFrames(TRACK_BUFFER_MS * RATE / 1000);
         }
         return t;
     }
