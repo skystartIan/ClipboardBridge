@@ -36,7 +36,7 @@ jobs:
           echo "android.jar = $ANDROID_JAR"
           mkdir -p out classes
           javac -source 8 -target 8 -bootclasspath "$ANDROID_JAR" \
-            -d classes clipagent/ClipAgent.java
+            -d classes clipagent/*.java
           "$D8" --min-api 26 --output out \
             $(find classes -name '*.class')
           mv out/classes.dex clipagent.dex
