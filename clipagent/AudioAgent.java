@@ -164,6 +164,13 @@ public final class AudioAgent {
                 boolean opus = in.readUnsignedByte() == 1;
                 out("AUDCONN:mic scid=" + String.format("%08x", scid) + " codec=" + (opus ? "opus" : "raw"));
                 new MicSession(micUdp, token, scid, opus).run(in, s.getOutputStream());
+            } else if (mode == 'A' && micUdp != null) {
+                int token = in.readInt();
+                boolean opus = in.readUnsignedByte() == 1;
+                int src = in.readUnsignedByte();
+                int bitrate = in.readInt();
+                out("AUDCONN:agent mic codec=" + (opus ? "opus" : "raw") + " src=" + src);
+                new AgentMicSession(micUdp, token, opus, src, bitrate).run(in, s.getOutputStream());
             } else if (mode == 'T') {
                 speaker = true;
                 play(in, track);
@@ -601,6 +608,257 @@ public final class AudioAgent {
             try { codec.stop(); } catch (Throwable ignore) {}
             try { codec.release(); } catch (Throwable ignore) {}
         }
+    }
+
+    // ── 麥克風：agent 自己錄（'A'）────────────────────────────
+    /**
+     * 不經 scrcpy-server，AudioAgent 自己用 AudioRecord 錄平板麥克風（11-07 為了量／降低錄音延遲）。
+     * 封包格式和送法跟 MicSession 一樣（token＋seq＋資料，跟著 PC 的 hello 回送），PC 端不用分。
+     *   音源 src：0 MIC、1 VOICE_COMMUNICATION、2 VOICE_RECOGNITION、3 UNPROCESSED、4 CAMCORDER
+     *   opus：用 MediaCodec 的 Opus 編碼器，每包 20 ms；否則每包 5 ms 的 PCM
+     * MICST 多回報 rec=：用 AudioRecord.getTimestamp 算「聲音進麥克風」到「程式讀到」的延遲（ms）。
+     * 建不起來（權限、音源不支援）就回一行 MICERR 後關掉，PC 會改用 scrcpy-server。
+     */
+    private static final class AgentMicSession {
+        private final DatagramSocket udp;
+        private final int token;
+        private final boolean opus;
+        private final int src;
+        private final int bitrate;
+        private volatile boolean running = true;
+        private volatile SocketAddress peer;
+        private volatile long tx, hello, framesRead;
+        private volatile android.media.AudioRecord rec;
+
+        AgentMicSession(DatagramSocket udp, int token, boolean opus, int src, int bitrate) {
+            this.udp = udp;
+            this.token = token;
+            this.opus = opus;
+            this.src = src;
+            this.bitrate = bitrate;
+        }
+
+        private static int sourceOf(int s) {
+            switch (s) {
+                case 1: return android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION;
+                case 2: return android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION;
+                case 3: return android.media.MediaRecorder.AudioSource.UNPROCESSED;
+                case 4: return android.media.MediaRecorder.AudioSource.CAMCORDER;
+                default: return android.media.MediaRecorder.AudioSource.MIC;
+            }
+        }
+
+        private long recLatencyMs() {
+            try {
+                android.media.AudioRecord r = rec;
+                if (r == null) return -1;
+                android.media.AudioTimestamp ts = new android.media.AudioTimestamp();
+                if (r.getTimestamp(ts, android.media.AudioTimestamp.TIMEBASE_MONOTONIC) != 0) return -1;
+                // 最後讀到的那個 frame 是什麼時候進麥克風的
+                double capturedNs = ts.nanoTime + (framesRead - ts.framePosition) * 1e9 / RATE;
+                return Math.round((System.nanoTime() - capturedNs) / 1e6);
+            } catch (Throwable t) {
+                return -1;
+            }
+        }
+
+        void run(final InputStream ctrlIn, final OutputStream ctrlOut) throws Exception {
+            Thread ctl = new Thread(new Runnable() {
+                public void run() {
+                    try { while (ctrlIn.read() >= 0) { } } catch (Throwable ignore) {}
+                    running = false;
+                }
+            }, "AMicCtl");
+            ctl.setDaemon(true);
+            ctl.start();
+
+            android.media.AudioRecord r;
+            OpusEnc enc = null;
+            try {
+                android.media.AudioFormat fmt = new android.media.AudioFormat.Builder()
+                        .setSampleRate(RATE)
+                        .setChannelMask(android.media.AudioFormat.CHANNEL_IN_STEREO)
+                        .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                        .build();
+                int min = android.media.AudioRecord.getMinBufferSize(RATE,
+                        android.media.AudioFormat.CHANNEL_IN_STEREO, android.media.AudioFormat.ENCODING_PCM_16BIT);
+                android.media.AudioRecord.Builder b = new android.media.AudioRecord.Builder()
+                        .setAudioSource(sourceOf(src))
+                        .setAudioFormat(fmt)
+                        .setBufferSizeInBytes(Math.max(min, 4 * OPUS_MS * BYTES_PER_MS));
+                if (Build.VERSION.SDK_INT >= 31) b.setContext(new ShellContext());
+                r = b.build();
+                if (r.getState() != android.media.AudioRecord.STATE_INITIALIZED) {
+                    r.release();
+                    throw new Exception("AudioRecord 沒有初始化");
+                }
+                r.startRecording();
+                if (opus) enc = new OpusEnc(bitrate);
+                out("AUDCONN:agent mic src=" + src + " min=" + min + " opus=" + opus);
+            } catch (Throwable t) {
+                String msg = "MICERR " + t + "\n";
+                try { ctrlOut.write(msg.getBytes("UTF-8")); ctrlOut.flush(); } catch (Throwable ignore) {}
+                out("AUDERR:agent mic " + t);
+                return;
+            }
+            rec = r;
+
+            Thread hel = new Thread(new Runnable() { public void run() { helloLoop(); } }, "AMicHello");
+            Thread st = new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        while (running) {
+                            Thread.sleep(250);
+                            SocketAddress p = peer;
+                            ctrlOut.write(("MICST tx=" + tx + " hello=" + hello + " rec=" + recLatencyMs()
+                                    + " src=" + src + " peer=" + (p == null ? "-" : p.toString())
+                                    + "\n").getBytes("UTF-8"));
+                            ctrlOut.flush();
+                        }
+                    } catch (Throwable t) {
+                        running = false;
+                    }
+                }
+            }, "AMicStat");
+            hel.setDaemon(true); st.setDaemon(true);
+            hel.start(); st.start();
+
+            int chunk = opus ? OPUS_MS * BYTES_PER_MS : PKT_PCM;
+            byte[] pcm = new byte[chunk];
+            byte[] pkt = new byte[PKT_HDR + 4000];
+            putInt(pkt, 0, token);
+            long seq = 0;
+            java.util.ArrayList<byte[]> outPkts = new java.util.ArrayList<byte[]>();
+            try {
+                while (running) {
+                    int n = 0;
+                    while (n < chunk && running) {
+                        int k = r.read(pcm, n, chunk - n);
+                        if (k < 0) throw new Exception("AudioRecord.read " + k);
+                        n += k;
+                    }
+                    framesRead += chunk / FRAME_BYTES;
+                    outPkts.clear();
+                    if (opus) {
+                        enc.encode(pcm, outPkts);
+                    } else {
+                        outPkts.add(pcm);
+                    }
+                    for (byte[] data : outPkts) {
+                        SocketAddress p = peer;
+                        if (p != null && data.length <= 4000) {
+                            putInt(pkt, 4, (int) seq);
+                            System.arraycopy(data, 0, pkt, PKT_HDR, data.length);
+                            try {
+                                udp.send(new DatagramPacket(pkt, PKT_HDR + data.length, p));
+                                tx++;
+                            } catch (Throwable t) {
+                                // 暫時送不出去：丟掉
+                            }
+                        }
+                        seq++;
+                    }
+                }
+            } finally {
+                running = false;
+                try { r.stop(); } catch (Throwable ignore) {}
+                r.release();
+                rec = null;
+                if (enc != null) enc.close();
+                hel.join(1000);
+            }
+        }
+
+        private void helloLoop() {
+            byte[] buf = new byte[64];
+            DatagramPacket p = new DatagramPacket(buf, buf.length);
+            while (running) {
+                try {
+                    p.setLength(buf.length);
+                    udp.receive(p);
+                } catch (java.net.SocketTimeoutException e) {
+                    continue;
+                } catch (Throwable t) {
+                    if (running) out("AUDERR:agent mic hello " + t);
+                    return;
+                }
+                if (p.getLength() == 4 && UdpSession.readInt(buf, 0) == token) {
+                    SocketAddress a = p.getSocketAddress();
+                    if (peer == null || !a.equals(peer)) out("AUDCONN:agent mic peer " + a);
+                    peer = a;
+                    hello++;
+                }
+            }
+        }
+
+        private static void putInt(byte[] b, int o, int v) {
+            b[o] = (byte) (v >>> 24);
+            b[o + 1] = (byte) (v >>> 16);
+            b[o + 2] = (byte) (v >>> 8);
+            b[o + 3] = (byte) v;
+        }
+    }
+
+    /** MediaCodec 的 Opus 編碼器（48 kHz 雙聲道），每次送 20 ms PCM，取出 0～n 個封包。 */
+    private static final class OpusEnc {
+        private final android.media.MediaCodec codec;
+        private final android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+        private long pts;
+
+        OpusEnc(int bitrate) throws Exception {
+            android.media.MediaFormat f = android.media.MediaFormat.createAudioFormat("audio/opus", RATE, 2);
+            f.setInteger(android.media.MediaFormat.KEY_BIT_RATE, bitrate);
+            codec = android.media.MediaCodec.createEncoderByType("audio/opus");
+            codec.configure(f, null, null, android.media.MediaCodec.CONFIGURE_FLAG_ENCODE);
+            codec.start();
+            out("AUDCONN:opus encoder " + codec.getName());
+        }
+
+        void encode(byte[] pcm, java.util.List<byte[]> out) {
+            int ii = codec.dequeueInputBuffer(20000);
+            if (ii >= 0) {
+                java.nio.ByteBuffer b = codec.getInputBuffer(ii);
+                b.clear();
+                b.put(pcm, 0, pcm.length);
+                codec.queueInputBuffer(ii, 0, pcm.length, pts, 0);
+                pts += OPUS_MS * 1000L;
+            }
+            while (true) {
+                int oi = codec.dequeueOutputBuffer(info, 0);
+                if (oi >= 0) {
+                    if ((info.flags & android.media.MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && info.size > 0) {
+                        java.nio.ByteBuffer ob = codec.getOutputBuffer(oi);
+                        byte[] d = new byte[info.size];
+                        ob.position(info.offset);
+                        ob.get(d);
+                        out.add(d);
+                    }
+                    codec.releaseOutputBuffer(oi, false);
+                } else if (oi == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
+                        || oi == android.media.MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        void close() {
+            try { codec.stop(); } catch (Throwable ignore) {}
+            try { codec.release(); } catch (Throwable ignore) {}
+        }
+    }
+
+    /** 讓 AudioRecord 以 shell（com.android.shell）身分錄音的假 Context，做法同 scrcpy 的 FakeContext。 */
+    private static final class ShellContext extends android.content.ContextWrapper {
+        ShellContext() { super(null); }
+        @Override public String getPackageName() { return "com.android.shell"; }
+        @Override public String getOpPackageName() { return "com.android.shell"; }
+        @Override public android.content.AttributionSource getAttributionSource() {
+            return new android.content.AttributionSource.Builder(2000).setPackageName("com.android.shell").build();
+        }
+        @Override public int getDeviceId() { return 0; }
+        @Override public android.content.Context getApplicationContext() { return this; }
     }
 
     // ── 麥克風 UDP（'M'）──────────────────────────────────
