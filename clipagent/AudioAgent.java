@@ -111,6 +111,8 @@ public final class AudioAgent {
             mu = null;
         }
         final DatagramSocket micUdp = mu;
+        final DatagramSocket spkUdp = udp;
+        final AudioTrack spkTrack = track;
 
         out("AUDRDY:port=" + port + " buffer=" + track.getBufferSizeInFrames() + "f"
                 + " capacity=" + (Build.VERSION.SDK_INT >= 24 ? track.getBufferCapacityInFrames() : -1) + "f"
@@ -123,7 +125,7 @@ public final class AudioAgent {
                 final Socket s = ss.accept();
                 // 一次可能同時有兩條：喇叭（'U'／'T'）和麥克風（'M'），各開一個執行緒
                 new Thread(new Runnable() {
-                    public void run() { handle(s, udp, micUdp, track); }
+                    public void run() { handle(s, spkUdp, micUdp, spkTrack); }
                 }, "AudConn").start();
             }
         } catch (Throwable t) {
