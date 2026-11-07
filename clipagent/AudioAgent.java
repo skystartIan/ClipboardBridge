@@ -163,8 +163,11 @@ public final class AudioAgent {
                 int token = in.readInt();
                 int scid = in.readInt();
                 boolean opus = in.readUnsignedByte() == 1;
+                int pcPort = in.readUnsignedShort();
                 out("AUDCONN:mic scid=" + String.format("%08x", scid) + " codec=" + (opus ? "opus" : "raw"));
-                new MicSession(micUdp, token, scid, opus).run(in, s.getOutputStream());
+                MicSession ms = new MicSession(micUdp, token, scid, opus);
+                ms.setInitialPeer(new InetSocketAddress(s.getInetAddress(), pcPort));
+                ms.run(in, s.getOutputStream());
             } else if (mode == 'L') {
                 int usage = in.readUnsignedByte();
                 int src = in.readUnsignedByte();
@@ -174,8 +177,11 @@ public final class AudioAgent {
                 boolean opus = in.readUnsignedByte() == 1;
                 int src = in.readUnsignedByte();
                 int bitrate = in.readInt();
+                int pcPort = in.readUnsignedShort();
                 out("AUDCONN:agent mic codec=" + (opus ? "opus" : "raw") + " src=" + src);
-                new AgentMicSession(micUdp, token, opus, src, bitrate).run(in, s.getOutputStream());
+                AgentMicSession am = new AgentMicSession(micUdp, token, opus, src, bitrate);
+                am.setInitialPeer(new InetSocketAddress(s.getInetAddress(), pcPort));
+                am.run(in, s.getOutputStream());
             } else if (mode == 'T') {
                 speaker = true;
                 play(in, track);
@@ -775,6 +781,13 @@ public final class AudioAgent {
         private volatile long tx, hello, framesRead;
         private volatile android.media.AudioRecord rec;
 
+        /** 先用「TCP 控制連線的對方 IP＋PC 告知的 UDP 埠」當回送位址，不用等 hello。
+         *  11-07 實測 hello 要約 3 秒才到，Teams 開麥克風的頭 3 秒都沒聲音；之後 hello 到了再改用它的來源。 */
+        void setInitialPeer(SocketAddress a) {
+            peer = a;
+            out("AUDCONN:agent mic initial peer " + a);
+        }
+
         AgentMicSession(DatagramSocket udp, int token, boolean opus, int src, int bitrate) {
             this.udp = udp;
             this.token = token;
@@ -1030,6 +1043,11 @@ public final class AudioAgent {
         private volatile long tx, hello;
 
         private final boolean opus;
+
+        void setInitialPeer(SocketAddress a) {
+            peer = a;
+            out("AUDCONN:mic initial peer " + a);
+        }
 
         MicSession(DatagramSocket udp, int token, int scid, boolean opus) {
             this.opus = opus;
