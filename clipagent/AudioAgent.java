@@ -164,6 +164,10 @@ public final class AudioAgent {
                 boolean opus = in.readUnsignedByte() == 1;
                 out("AUDCONN:mic scid=" + String.format("%08x", scid) + " codec=" + (opus ? "opus" : "raw"));
                 new MicSession(micUdp, token, scid, opus).run(in, s.getOutputStream());
+            } else if (mode == 'L') {
+                int usage = in.readUnsignedByte();
+                int src = in.readUnsignedByte();
+                loopTest(usage, src, s.getOutputStream());
             } else if (mode == 'A' && micUdp != null) {
                 int token = in.readInt();
                 boolean opus = in.readUnsignedByte() == 1;
@@ -608,6 +612,118 @@ public final class AudioAgent {
             try { codec.stop(); } catch (Throwable ignore) {}
             try { codec.release(); } catch (Throwable ignore) {}
         }
+    }
+
+    // ── 平板本機迴路測試（'L'）────────────────────────────
+    /**
+     * 只在平板上量「喇叭 → 空氣 → 麥克風」的來回：用一條新的 AudioTrack 嗶 5 次，同時用 AudioRecord 錄，
+     * 看每次嗶聲從「寫進 AudioTrack」到「錄到」隔多久。不經網路、不經 X1。
+     *   usage：0 = MEDIA（喇叭轉送現在用的），1 = VOICE_COMMUNICATION（通話路徑，常繞過音效）
+     *   src  ：AgentMicSession 的音源編號
+     * 結果用一行 "LOOP usage=.. src=.. ms=a,b,c,d,e" 回給 PC。
+     */
+    private static void loopTest(int usage, int src, OutputStream outS) throws Exception {
+        android.media.AudioAttributes.Builder ab = new android.media.AudioAttributes.Builder();
+        if (usage == 1) {
+            ab.setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+              .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH);
+        } else {
+            ab.setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+              .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH);
+        }
+        android.media.AudioFormat ofmt = new android.media.AudioFormat.Builder().setSampleRate(RATE)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_STEREO)
+                .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT).build();
+        android.media.AudioTrack.Builder tb = new android.media.AudioTrack.Builder()
+                .setAudioAttributes(ab.build()).setAudioFormat(ofmt)
+                .setBufferSizeInBytes(Math.max(android.media.AudioTrack.getMinBufferSize(RATE,
+                        android.media.AudioFormat.CHANNEL_OUT_STEREO, android.media.AudioFormat.ENCODING_PCM_16BIT),
+                        4 * PKT_PCM))
+                .setTransferMode(android.media.AudioTrack.MODE_STREAM);
+        if (Build.VERSION.SDK_INT >= 26) tb.setPerformanceMode(android.media.AudioTrack.PERFORMANCE_MODE_LOW_LATENCY);
+        final android.media.AudioTrack t = tb.build();
+        if (Build.VERSION.SDK_INT >= 24) t.setBufferSizeInFrames(TRACK_BUFFER_MS * RATE / 1000);
+
+        android.media.AudioFormat ifmt = new android.media.AudioFormat.Builder().setSampleRate(RATE)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_IN_STEREO)
+                .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT).build();
+        android.media.AudioRecord.Builder rb = new android.media.AudioRecord.Builder()
+                .setAudioSource(AgentMicSession.sourceOf(src)).setAudioFormat(ifmt)
+                .setBufferSizeInBytes(Math.max(android.media.AudioRecord.getMinBufferSize(RATE,
+                        android.media.AudioFormat.CHANNEL_IN_STEREO, android.media.AudioFormat.ENCODING_PCM_16BIT),
+                        8 * PKT_PCM));
+        if (Build.VERSION.SDK_INT >= 31) rb.setContext(new ShellContext());
+        final android.media.AudioRecord r = rb.build();
+
+        final int secs = 8;
+        final short[] recBuf = new short[RATE * secs];         // 只存左聲道
+        final long[] recStartNs = new long[1];
+        r.startRecording();
+        Thread rt = new Thread(new Runnable() {
+            public void run() {
+                byte[] b = new byte[PKT_PCM];
+                int pos = 0;
+                recStartNs[0] = System.nanoTime();
+                while (pos < recBuf.length) {
+                    int n = r.read(b, 0, b.length);
+                    if (n <= 0) break;
+                    for (int i = 0; i + 3 < n && pos < recBuf.length; i += 4) {
+                        recBuf[pos++] = (short) ((b[i] & 0xFF) | (b[i + 1] << 8));
+                    }
+                }
+            }
+        }, "LoopRec");
+        rt.start();
+
+        // 嗶：1500 Hz、100 ms；每 1.2 秒一次，前 1 秒安靜（量底噪）
+        byte[] silence = new byte[PKT_PCM];
+        byte[] beep = new byte[RATE / 10 * FRAME_BYTES];
+        for (int i = 0; i < RATE / 10; i++) {
+            double env = Math.min(1.0, Math.min(i / 240.0, (RATE / 10 - i) / 240.0));
+            short v = (short) (16000 * env * Math.sin(2 * Math.PI * 1500 * i / RATE));
+            beep[4 * i] = (byte) v; beep[4 * i + 1] = (byte) (v >> 8);
+            beep[4 * i + 2] = (byte) v; beep[4 * i + 3] = (byte) (v >> 8);
+        }
+        t.play();
+        long[] sentNs = new long[5];
+        long start = System.nanoTime();
+        int k = 0;
+        long written = 0;
+        while (System.nanoTime() - start < (long) (secs - 1) * 1000000000L) {
+            long el = (System.nanoTime() - start) / 1000000L;
+            if (k < 5 && el >= 1000 + k * 1200) {
+                // 嗶聲的第一個 frame 在 written 這個位置；記下「寫入時刻」＋「前面還有多少沒播」
+                sentNs[k] = System.nanoTime();
+                t.write(beep, 0, beep.length);
+                written += beep.length / FRAME_BYTES;
+                k++;
+            } else {
+                t.write(silence, 0, silence.length);
+                written += silence.length / FRAME_BYTES;
+            }
+        }
+        rt.join(3000);
+        t.stop(); t.release();
+        r.stop(); r.release();
+
+        // 底噪：第 0.2～0.9 秒
+        int floor = 0;
+        for (int i = (int) (0.2 * RATE); i < (int) (0.9 * RATE); i++) floor = Math.max(floor, Math.abs(recBuf[i]));
+        int thr = Math.max(floor * 4, 800);
+        StringBuilder sb = new StringBuilder();
+        for (int j = 0; j < k; j++) {
+            int from = (int) ((sentNs[j] - recStartNs[0]) * RATE / 1000000000L);
+            int hit = -1;
+            for (int i = Math.max(0, from); i < Math.min(recBuf.length, from + RATE); i++) {
+                if (Math.abs(recBuf[i]) > thr) { hit = i; break; }
+            }
+            if (sb.length() > 0) sb.append(',');
+            sb.append(hit < 0 ? "-" : String.valueOf((hit - from) * 1000L / RATE));
+        }
+        String line = "LOOP usage=" + usage + " src=" + src + " floor=" + floor + " ms=" + sb + "\n";
+        out("AUD" + line.trim());
+        outS.write(line.getBytes("UTF-8"));
+        outS.flush();
     }
 
     // ── 麥克風：agent 自己錄（'A'）────────────────────────────
