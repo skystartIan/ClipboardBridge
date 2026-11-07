@@ -289,8 +289,20 @@ public final class AudioAgent {
         private volatile boolean running = true;
 
         // 統計（累計值，PC 自己算差）
-        private long rx, lost, late, under, skipped, concealed;
+        private long rx, lost, late, under, skipped, concealed, drained;
         private volatile long framesWritten;   // 寫進 AudioTrack 的 frame 數（量播放管線延遲用）
+        private long overSince;                // 緩衝超過目標開始的時間（ms）；0 = 沒超過
+        private static final int DRAIN_MARGIN_MS = 40;
+        private static final int DRAIN_QUIET = 800;
+
+        private static int peak(byte[] b, int n) {
+            int m = 0;
+            for (int i = 0; i + 1 < n; i += 2) {
+                int v = Math.abs((short) ((b[i] & 0xFF) | (b[i + 1] << 8)));
+                if (v > m) m = v;
+            }
+            return m;
+        }
 
         /** AudioTrack 管線延遲（ms）：已寫入但還沒從喇叭播出的量，用 getTimestamp 算；拿不到回 -1。 */
         private long trackLatencyMs() {
@@ -344,7 +356,8 @@ public final class AudioAgent {
                                 line = "AUDST rx=" + rx + " lost=" + lost + " late=" + late
                                         + " under=" + under + " skip=" + skipped
                                         + " conceal=" + concealed + " depth=" + depth
-                                        + " target=" + targetPkts * pktMs + " pktms=" + pktMs;
+                                        + " target=" + targetPkts * pktMs + " pktms=" + pktMs
+                                        + " drain=" + drained;
                             }
                             line += " trk=" + trackLatencyMs() + "\n";
                             ctrlOut.write(line.getBytes("UTF-8"));
@@ -473,6 +486,24 @@ public final class AudioAgent {
                     n = pcmLen;
                 }
                 if (n <= 0) continue;
+                // 降回目標：一批封包湧進來後緩衝會卡在目標之上，兩端時脈一樣快就永遠不會自己降。
+                // 超過目標 DRAIN_MARGIN_MS 持續 1 秒，就把安靜的那一包丟掉不播；一直沒有安靜片段，
+                // 超過 4 秒就直接丟（11-07 實測目標 80 時實際積了 200）。
+                if (got) {
+                    long excessPkts;
+                    synchronized (lock) { excessPkts = (highest - next + 1) - targetPkts; }
+                    long nowMs = System.currentTimeMillis();
+                    if (excessPkts * pktMs > DRAIN_MARGIN_MS) {
+                        if (overSince == 0) overSince = nowMs;
+                        else if (nowMs - overSince > 1000
+                                && (nowMs - overSince > 4000 || peak(outBuf, n) < DRAIN_QUIET)) {
+                            synchronized (lock) { drained += n / BYTES_PER_MS; }
+                            continue;
+                        }
+                    } else {
+                        overSince = 0;
+                    }
+                }
                 if (!playing) {
                     track.play();
                     playing = true;
