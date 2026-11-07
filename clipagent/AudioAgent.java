@@ -65,7 +65,11 @@ public final class AudioAgent {
     private static final int PKT_MS = 5;
     private static final int PKT_PCM = PKT_MS * BYTES_PER_MS;      // 960
     private static final int PKT_HDR = 8;
-    private static final int SLOTS = 128;                          // 640 ms 的格子
+    private static final int SLOTS = 256;                          // 1.28 s 的格子
+    // 喇叭抖動緩衝自動調整：每斷一次目標加 STEP，一分鐘沒斷就減 STEP/2，回到 PC 給的起始值為止。
+    // 上限 = max(PC 給的上限, 目標×3)。11-07 熱點實測固定 30 ms 時每分鐘斷 9 次。
+    private static final int ADAPT_STEP_PKTS = 4;                  // 20 ms
+    private static final int ADAPT_CAP_PKTS = 80;                  // 400 ms
 
     public static void main(String[] args) {
         int port = 27230;
@@ -257,8 +261,12 @@ public final class AudioAgent {
         private final DatagramSocket udp;
         private final AudioTrack track;
         private final int token;
-        private final int targetPkts;
-        private final int maxPkts;
+        private final int baseTarget;
+        private final int baseMax;
+        private int targetPkts;          // 會自己調（lock 保護）
+        private int maxPkts;
+        private long lastUnderMs = System.currentTimeMillis();
+        private long lastDecayMs = System.currentTimeMillis();
 
         private final Object lock = new Object();
         private final byte[][] slotData = new byte[SLOTS][PKT_PCM];
@@ -274,8 +282,10 @@ public final class AudioAgent {
             this.udp = udp;
             this.track = track;
             this.token = token;
-            this.targetPkts = Math.max(1, Math.min(SLOTS / 2, targetMs / PKT_MS));
-            this.maxPkts = Math.max(targetPkts + 2, Math.min(SLOTS - 4, maxMs / PKT_MS));
+            this.baseTarget = Math.max(1, Math.min(ADAPT_CAP_PKTS, targetMs / PKT_MS));
+            this.baseMax = Math.max(baseTarget + 2, Math.min(SLOTS - 8, maxMs / PKT_MS));
+            this.targetPkts = baseTarget;
+            this.maxPkts = baseMax;
             for (int i = 0; i < SLOTS; i++) slotSeq[i] = -1;
         }
 
@@ -299,7 +309,8 @@ public final class AudioAgent {
                                 long depth = (next >= 0 && highest >= next) ? (highest - next + 1) * PKT_MS : 0;
                                 line = "AUDST rx=" + rx + " lost=" + lost + " late=" + late
                                         + " under=" + under + " skip=" + skipped
-                                        + " conceal=" + concealed + " depth=" + depth + "\n";
+                                        + " conceal=" + concealed + " depth=" + depth
+                                        + " target=" + targetPkts * PKT_MS + "\n";
                             }
                             ctrlOut.write(line.getBytes("UTF-8"));
                             ctrlOut.flush();
@@ -368,7 +379,17 @@ public final class AudioAgent {
                     if (depth <= 0) {                           // 沒資料了：重新攢
                         priming = true;
                         under++;
+                        targetPkts = Math.min(ADAPT_CAP_PKTS, targetPkts + ADAPT_STEP_PKTS);
+                        maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
+                        lastUnderMs = System.currentTimeMillis();
                         continue;
+                    }
+                    long nowMs = System.currentTimeMillis();
+                    if (targetPkts > baseTarget && nowMs - lastUnderMs > 60000
+                            && nowMs - lastDecayMs > 60000) {      // 穩了一分鐘：慢慢縮回去
+                        targetPkts = Math.max(baseTarget, targetPkts - ADAPT_STEP_PKTS / 2);
+                        maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
+                        lastDecayMs = nowMs;
                     }
                     if (depth > maxPkts) {                      // 積太多：跳到最新的 target
                         long nn = highest - targetPkts + 1;
