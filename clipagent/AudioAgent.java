@@ -65,6 +65,7 @@ public final class AudioAgent {
     private static final int PKT_MS = 5;
     private static final int PKT_PCM = PKT_MS * BYTES_PER_MS;      // 960
     private static final int PKT_HDR = 8;
+    private static final int OPUS_MS = 20;                         // Opus 每包 20 ms
     private static final int SLOTS = 256;                          // 1.28 s 的格子
     // 喇叭抖動緩衝自動調整：每斷一次目標加 STEP，一分鐘沒斷就減 STEP/2，回到 PC 給的起始值為止。
     // 上限 = max(PC 給的上限, 目標×3)。11-07 熱點實測固定 30 ms 時每分鐘斷 9 次。
@@ -154,13 +155,15 @@ public final class AudioAgent {
                 int token = in.readInt();
                 int target = in.readUnsignedShort();
                 int max = in.readUnsignedShort();
-                out("AUDCONN:udp target=" + target + "ms max=" + max + "ms");
-                new UdpSession(udp, track, token, target, max).run(in, s.getOutputStream());
+                boolean opus = in.readUnsignedByte() == 1;
+                out("AUDCONN:udp target=" + target + "ms max=" + max + "ms codec=" + (opus ? "opus" : "raw"));
+                new UdpSession(udp, track, token, target, max, opus).run(in, s.getOutputStream());
             } else if (mode == 'M' && micUdp != null) {
                 int token = in.readInt();
                 int scid = in.readInt();
-                out("AUDCONN:mic scid=" + String.format("%08x", scid));
-                new MicSession(micUdp, token, scid).run(in, s.getOutputStream());
+                boolean opus = in.readUnsignedByte() == 1;
+                out("AUDCONN:mic scid=" + String.format("%08x", scid) + " codec=" + (opus ? "opus" : "raw"));
+                new MicSession(micUdp, token, scid, opus).run(in, s.getOutputStream());
             } else if (mode == 'T') {
                 speaker = true;
                 play(in, track);
@@ -257,10 +260,19 @@ public final class AudioAgent {
     }
 
     // ── UDP（'U'）─────────────────────────────────────────
+    /**
+     * 喇叭 UDP。raw：每包 5 ms 的 PCM。opus（平板在計費網路時，PC 決定）：每包是一個
+     * 20 ms 的 Opus 封包，這裡用 MediaCodec 解回 PCM 再播。抖動緩衝以「包」為單位，
+     * 目標／上限用 ms 換算。
+     */
     private static final class UdpSession {
         private final DatagramSocket udp;
         private final AudioTrack track;
         private final int token;
+        private final boolean opus;
+        private final int pktMs;
+        private final int stepPkts;
+        private final int capPkts;
         private final int baseTarget;
         private final int baseMax;
         private int targetPkts;          // 會自己調（lock 保護）
@@ -269,7 +281,8 @@ public final class AudioAgent {
         private long lastDecayMs = System.currentTimeMillis();
 
         private final Object lock = new Object();
-        private final byte[][] slotData = new byte[SLOTS][PKT_PCM];
+        private final byte[][] slotData = new byte[SLOTS][];
+        private final int[] slotLen = new int[SLOTS];
         private final long[] slotSeq = new long[SLOTS];
         private long next = -1;          // 下一個要播的 seq；-1 = 還沒收到任何包
         private long highest = -1;
@@ -278,15 +291,23 @@ public final class AudioAgent {
         // 統計（累計值，PC 自己算差）
         private long rx, lost, late, under, skipped, concealed;
 
-        UdpSession(DatagramSocket udp, AudioTrack track, int token, int targetMs, int maxMs) {
+        UdpSession(DatagramSocket udp, AudioTrack track, int token, int targetMs, int maxMs, boolean opus) {
             this.udp = udp;
             this.track = track;
             this.token = token;
-            this.baseTarget = Math.max(1, Math.min(ADAPT_CAP_PKTS, targetMs / PKT_MS));
-            this.baseMax = Math.max(baseTarget + 2, Math.min(SLOTS - 8, maxMs / PKT_MS));
+            this.opus = opus;
+            this.pktMs = opus ? OPUS_MS : PKT_MS;
+            this.stepPkts = Math.max(1, ADAPT_STEP_PKTS * PKT_MS / pktMs);
+            this.capPkts = Math.max(2, ADAPT_CAP_PKTS * PKT_MS / pktMs);
+            this.baseTarget = Math.max(opus ? 2 : 1, Math.min(capPkts, targetMs / pktMs));
+            this.baseMax = Math.max(baseTarget + 2, Math.min(SLOTS - 8, maxMs / pktMs));
             this.targetPkts = baseTarget;
             this.maxPkts = baseMax;
-            for (int i = 0; i < SLOTS; i++) slotSeq[i] = -1;
+            int cap = opus ? 2000 : PKT_PCM;
+            for (int i = 0; i < SLOTS; i++) {
+                slotSeq[i] = -1;
+                slotData[i] = new byte[cap];
+            }
         }
 
         void run(final InputStream ctrlIn, final OutputStream ctrlOut) throws Exception {
@@ -306,11 +327,11 @@ public final class AudioAgent {
                             Thread.sleep(1000);
                             String line;
                             synchronized (lock) {
-                                long depth = (next >= 0 && highest >= next) ? (highest - next + 1) * PKT_MS : 0;
+                                long depth = (next >= 0 && highest >= next) ? (highest - next + 1) * pktMs : 0;
                                 line = "AUDST rx=" + rx + " lost=" + lost + " late=" + late
                                         + " under=" + under + " skip=" + skipped
                                         + " conceal=" + concealed + " depth=" + depth
-                                        + " target=" + targetPkts * PKT_MS + "\n";
+                                        + " target=" + targetPkts * pktMs + " pktms=" + pktMs + "\n";
                             }
                             ctrlOut.write(line.getBytes("UTF-8"));
                             ctrlOut.flush();
@@ -323,16 +344,19 @@ public final class AudioAgent {
             }, "AudUdpStat");
             rxT.setDaemon(true); ctl.setDaemon(true); st.setDaemon(true);
             rxT.start(); ctl.start(); st.start();
+            OpusDec dec = null;
             try {
-                playLoop();
+                if (opus) dec = new OpusDec();
+                playLoop(dec);
             } finally {
                 running = false;
+                if (dec != null) dec.close();
                 rxT.join(1000);
             }
         }
 
         private void receive() {
-            byte[] buf = new byte[2048];
+            byte[] buf = new byte[4096];
             DatagramPacket p = new DatagramPacket(buf, buf.length);
             while (running) {
                 try {
@@ -344,7 +368,8 @@ public final class AudioAgent {
                     if (running) out("AUDERR:udp rx " + t);
                     return;
                 }
-                if (p.getLength() != PKT_HDR + PKT_PCM) continue;
+                int len = p.getLength() - PKT_HDR;
+                if (opus ? (len <= 0 || len > 2000) : len != PKT_PCM) continue;
                 int tok = readInt(buf, 0);
                 if (tok != token) continue;                     // 舊連線殘留的包
                 long seq = readInt(buf, 4) & 0xFFFFFFFFL;
@@ -352,7 +377,8 @@ public final class AudioAgent {
                     rx++;
                     if (next >= 0 && seq < next) { late++; continue; }
                     int i = (int) (seq % SLOTS);
-                    System.arraycopy(buf, PKT_HDR, slotData[i], 0, PKT_PCM);
+                    System.arraycopy(buf, PKT_HDR, slotData[i], 0, len);
+                    slotLen[i] = len;
                     slotSeq[i] = seq;
                     if (seq > highest) highest = seq;
                     if (next < 0) next = seq;
@@ -361,14 +387,17 @@ public final class AudioAgent {
             }
         }
 
-        private void playLoop() throws InterruptedException {
-            byte[] outBuf = new byte[PKT_PCM];
-            byte[] last = new byte[PKT_PCM];
+        private void playLoop(OpusDec dec) throws Exception {
+            int pcmLen = pktMs * BYTES_PER_MS;
+            byte[] pktBuf = new byte[2000];
+            byte[] outBuf = new byte[opus ? 16384 : PKT_PCM];
+            byte[] last = new byte[pcmLen];
             boolean haveLast = false;
             boolean priming = true;
             boolean playing = false;
             while (running) {
                 boolean got;
+                int plen = 0;
                 synchronized (lock) {
                     if (next < 0 || (priming && highest - next + 1 < targetPkts)) {
                         lock.wait(20);
@@ -379,7 +408,7 @@ public final class AudioAgent {
                     if (depth <= 0) {                           // 沒資料了：重新攢
                         priming = true;
                         under++;
-                        targetPkts = Math.min(ADAPT_CAP_PKTS, targetPkts + ADAPT_STEP_PKTS);
+                        targetPkts = Math.min(capPkts, targetPkts + stepPkts);
                         maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
                         lastUnderMs = System.currentTimeMillis();
                         continue;
@@ -387,41 +416,54 @@ public final class AudioAgent {
                     long nowMs = System.currentTimeMillis();
                     if (targetPkts > baseTarget && nowMs - lastUnderMs > 60000
                             && nowMs - lastDecayMs > 60000) {      // 穩了一分鐘：慢慢縮回去
-                        targetPkts = Math.max(baseTarget, targetPkts - ADAPT_STEP_PKTS / 2);
+                        targetPkts = Math.max(baseTarget, targetPkts - Math.max(1, stepPkts / 2));
                         maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
                         lastDecayMs = nowMs;
                     }
                     if (depth > maxPkts) {                      // 積太多：跳到最新的 target
                         long nn = highest - targetPkts + 1;
-                        skipped += nn - next;
+                        skipped += (nn - next) * pktMs / PKT_MS;   // 以 5 ms 為單位回報，PC 端照舊換算
                         next = nn;
                     }
                     int i = (int) (next % SLOTS);
                     got = slotSeq[i] == next;
                     if (got) {
-                        System.arraycopy(slotData[i], 0, outBuf, 0, PKT_PCM);
+                        plen = slotLen[i];
+                        System.arraycopy(slotData[i], 0, pktBuf, 0, plen);
                         slotSeq[i] = -1;
                     } else {
                         lost++;
                     }
                     next++;
                 }
-                if (got) {
+                int n;
+                if (got && opus) {
+                    n = dec.decode(pktBuf, plen, outBuf);
+                    if (n > 0) {
+                        System.arraycopy(outBuf, 0, last, 0, Math.min(n, pcmLen));
+                        haveLast = true;
+                    }
+                } else if (got) {
+                    System.arraycopy(pktBuf, 0, outBuf, 0, PKT_PCM);
                     System.arraycopy(outBuf, 0, last, 0, PKT_PCM);
                     haveLast = true;
+                    n = PKT_PCM;
                 } else if (haveLast) {
                     // 掉一包：用上一包減半補（比整段靜音不明顯）；連續掉就越來越小聲
                     halve(last);
-                    System.arraycopy(last, 0, outBuf, 0, PKT_PCM);
+                    System.arraycopy(last, 0, outBuf, 0, pcmLen);
+                    n = pcmLen;
                     synchronized (lock) { concealed++; }
                 } else {
-                    java.util.Arrays.fill(outBuf, (byte) 0);
+                    java.util.Arrays.fill(outBuf, 0, pcmLen, (byte) 0);
+                    n = pcmLen;
                 }
+                if (n <= 0) continue;
                 if (!playing) {
                     track.play();
                     playing = true;
                 }
-                track.write(outBuf, 0, PKT_PCM);                // 阻塞：AudioTrack 決定播放速度
+                track.write(outBuf, 0, n);                      // 阻塞：AudioTrack 決定播放速度
             }
         }
 
@@ -437,6 +479,68 @@ public final class AudioAgent {
         private static int readInt(byte[] b, int o) {
             return ((b[o] & 0xFF) << 24) | ((b[o + 1] & 0xFF) << 16)
                     | ((b[o + 2] & 0xFF) << 8) | (b[o + 3] & 0xFF);
+        }
+    }
+
+    /** MediaCodec 的 Opus 解碼器（48 kHz 雙聲道），同步模式，一包進、PCM 出。 */
+    private static final class OpusDec {
+        private final android.media.MediaCodec codec;
+        private final android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+        private long pts;
+
+        OpusDec() throws Exception {
+            android.media.MediaFormat f = android.media.MediaFormat.createAudioFormat("audio/opus", RATE, 2);
+            // OpusHead：版本 1、2 聲道、pre-skip 312、48000 Hz、增益 0、mapping 0（皆 little-endian）
+            byte[] head = {'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2, (byte) 0x38, 0x01,
+                    (byte) 0x80, (byte) 0xBB, 0, 0, 0, 0, 0};
+            f.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(head));
+            java.nio.ByteBuffer d = java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            d.putLong(312L * 1000000000L / RATE);
+            d.flip();
+            f.setByteBuffer("csd-1", d);
+            java.nio.ByteBuffer pr = java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            pr.putLong(80000000L);
+            pr.flip();
+            f.setByteBuffer("csd-2", pr);
+            codec = android.media.MediaCodec.createDecoderByType("audio/opus");
+            codec.configure(f, null, null, 0);
+            codec.start();
+            out("AUDCONN:opus decoder " + codec.getName());
+        }
+
+        int decode(byte[] pkt, int len, byte[] out) {
+            int ii = codec.dequeueInputBuffer(20000);
+            if (ii >= 0) {
+                java.nio.ByteBuffer b = codec.getInputBuffer(ii);
+                b.clear();
+                b.put(pkt, 0, len);
+                codec.queueInputBuffer(ii, 0, len, pts, 0);
+                pts += OPUS_MS * 1000L;
+            }
+            int n = 0;
+            while (true) {
+                int oi = codec.dequeueOutputBuffer(info, n == 0 ? 20000 : 0);
+                if (oi >= 0) {
+                    java.nio.ByteBuffer ob = codec.getOutputBuffer(oi);
+                    int sz = Math.min(info.size, out.length - n);
+                    ob.position(info.offset);
+                    ob.get(out, n, sz);
+                    n += sz;
+                    codec.releaseOutputBuffer(oi, false);
+                    if (n >= out.length / 2) break;
+                } else if (oi == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
+                        || oi == android.media.MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            return n;
+        }
+
+        void close() {
+            try { codec.stop(); } catch (Throwable ignore) {}
+            try { codec.release(); } catch (Throwable ignore) {}
         }
     }
 
@@ -463,7 +567,10 @@ public final class AudioAgent {
         private volatile LocalSocket ls;
         private volatile long tx, hello;
 
-        MicSession(DatagramSocket udp, int token, int scid) {
+        private final boolean opus;
+
+        MicSession(DatagramSocket udp, int token, int scid, boolean opus) {
+            this.opus = opus;
             this.udp = udp;
             this.token = token;
             this.scid = scid;
@@ -516,22 +623,35 @@ public final class AudioAgent {
             hel.setDaemon(true); st.setDaemon(true);
             hel.start(); st.start();
 
-            byte[] pkt = new byte[PKT_HDR + PKT_PCM];
+            DataInputStream din = new DataInputStream(pcm);
+            if (opus) {
+                // server 用 audio_codec=opus、send_codec_meta、send_frame_meta：先 4 bytes codec id
+                int codec = din.readInt();
+                if (codec == 0 || codec == 1) throw new Exception("server 停用了麥克風串流 codec=" + codec);
+            }
+            byte[] pkt = new byte[PKT_HDR + (opus ? 4000 : PKT_PCM)];
+            byte[] fh = new byte[12];
             putInt(pkt, 0, token);
             long seq = 0;
             try {
                 while (running) {
-                    int n = 0;
-                    while (n < PKT_PCM) {
-                        int r = pcm.read(pkt, PKT_HDR + n, PKT_PCM - n);
-                        if (r < 0) return;
-                        n += r;
+                    int len;
+                    if (opus) {
+                        // 每個 Opus 封包前有 12 bytes：pts＋旗標(8)、長度(4)；config 封包（OpusHead）不用送
+                        din.readFully(fh);
+                        len = ((fh[8] & 0xFF) << 24) | ((fh[9] & 0xFF) << 16) | ((fh[10] & 0xFF) << 8) | (fh[11] & 0xFF);
+                        if (len < 0 || len > 4000) throw new Exception("Opus 封包長度怪怪的：" + len);
+                        din.readFully(pkt, PKT_HDR, len);
+                        if ((fh[0] & 0x80) != 0) continue;          // PACKET_FLAG_CONFIG
+                    } else {
+                        len = PKT_PCM;
+                        din.readFully(pkt, PKT_HDR, len);
                     }
                     SocketAddress p = peer;
                     if (p != null) {
                         putInt(pkt, 4, (int) seq);
                         try {
-                            udp.send(new DatagramPacket(pkt, pkt.length, p));
+                            udp.send(new DatagramPacket(pkt, PKT_HDR + len, p));
                             tx++;
                         } catch (Throwable t) {
                             // 暫時送不出去（換網路中）：丟掉這包，繼續
