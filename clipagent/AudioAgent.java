@@ -482,8 +482,7 @@ public final class AudioAgent {
                             Thread.sleep(1000);
                             SocketAddress p = peer;
                             ctrlOut.write(("MICST tx=" + tx + " hello=" + hello
-                                    + " peer=" + (p == null ? "-" : p.toString()) + "
-").getBytes("UTF-8"));
+                                    + " peer=" + (p == null ? "-" : p.toString()) + "\n").getBytes("UTF-8"));
                             ctrlOut.flush();
                         }
                     } catch (Throwable t) {
