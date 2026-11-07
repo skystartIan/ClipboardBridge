@@ -291,8 +291,11 @@ public final class AudioAgent {
         // 統計（累計值，PC 自己算差）
         private long rx, lost, late, under, skipped, concealed, drained;
         private volatile long framesWritten;   // 寫進 AudioTrack 的 frame 數（量播放管線延遲用）
-        private long overSince;                // 緩衝超過目標開始的時間（ms）；0 = 沒超過
-        private static final int DRAIN_MARGIN_MS = 40;
+        private long winStart = System.currentTimeMillis();   // 這一秒的觀察窗
+        private long winMin = Long.MAX_VALUE;  // 觀察窗內最低深度（包）
+        private long drainBudget;              // 還要丟幾包才回到目標
+        private long budgetSince;              // 預算從什麼時候開始（ms）
+        private static final int DRAIN_MARGIN_MS = 20;
         private static final int DRAIN_QUIET = 800;
 
         private static int peak(byte[] b, int n) {
@@ -487,22 +490,32 @@ public final class AudioAgent {
                 }
                 if (n <= 0) continue;
                 // 降回目標：一批封包湧進來後緩衝會卡在目標之上，兩端時脈一樣快就永遠不會自己降。
-                // 超過目標 DRAIN_MARGIN_MS 持續 1 秒，就把安靜的那一包丟掉不播；一直沒有安靜片段，
-                // 超過 4 秒就直接丟（11-07 實測目標 80 時實際積了 200）。
-                if (got) {
-                    long excessPkts;
-                    synchronized (lock) { excessPkts = (highest - next + 1) - targetPkts; }
-                    long nowMs = System.currentTimeMillis();
-                    if (excessPkts * pktMs > DRAIN_MARGIN_MS) {
-                        if (overSince == 0) overSince = nowMs;
-                        else if (nowMs - overSince > 1000
-                                && (nowMs - overSince > 4000 || peak(outBuf, n) < DRAIN_QUIET)) {
-                            synchronized (lock) { drained += n / BYTES_PER_MS; }
-                            continue;
-                        }
+                // 每秒看一次「這一秒裡最低的深度」，連最低點都比目標高 DRAIN_MARGIN_MS 以上，
+                // 多出來的就是白白多積的延遲：記成預算，之後遇到安靜的包就丟（不播）。
+                // 連續 3 秒都沒遇到安靜的包就直接丟。11-07 實測：目標 40 時深度一直在 80～100，
+                // 第一版用「持續超過 1 秒」判斷，深度一跳到 80 就重置，一分鐘只去掉 20 ms。
+                long nowMs = System.currentTimeMillis();
+                long depthNow;
+                synchronized (lock) { depthNow = highest - next + 1; }
+                if (depthNow < winMin) winMin = depthNow;
+                if (nowMs - winStart >= 1000) {
+                    long excess = winMin - targetPkts;
+                    if (excess * pktMs > DRAIN_MARGIN_MS) {
+                        drainBudget = excess;
+                        if (budgetSince == 0) budgetSince = nowMs;
                     } else {
-                        overSince = 0;
+                        drainBudget = 0;
+                        budgetSince = 0;
                     }
+                    winMin = Long.MAX_VALUE;
+                    winStart = nowMs;
+                }
+                if (got && drainBudget > 0
+                        && (peak(outBuf, n) < DRAIN_QUIET || nowMs - budgetSince > 3000)) {
+                    drainBudget--;
+                    if (drainBudget == 0) budgetSince = 0;
+                    synchronized (lock) { drained += n / BYTES_PER_MS; }
+                    continue;
                 }
                 if (!playing) {
                     track.play();
