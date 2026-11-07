@@ -59,7 +59,8 @@ public final class AudioAgent {
     private static final int TARGET_BACKLOG_MS = 30;
     // AudioTrack 實際配到的緩衝常常是 128 ms（6144 frames）；寫入是阻塞的，緩衝會被填滿，
     // 等於固定多 128 ms 延遲。建好後把「有效緩衝」縮到這個長度。
-    private static final int TRACK_BUFFER_MS = 40;
+    // 11-07：dumpsys media.audio_flinger 確認這條軌已經是 FAST（F1），可以用更小的緩衝；40 → 20 ms
+    private static final int TRACK_BUFFER_MS = 20;
 
     // UDP
     private static final int PKT_MS = 5;
