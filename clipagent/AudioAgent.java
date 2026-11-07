@@ -685,15 +685,23 @@ public final class AudioAgent {
             beep[4 * i + 2] = (byte) v; beep[4 * i + 3] = (byte) (v >> 8);
         }
         t.play();
+        // 時間軸一律用硬體時間戳對齊（第一版用「開始讀的時刻」，AudioRecord 第一次 read 會先吐
+        // 之前錄好的緩衝，時間整段錯位，量出 0 ms）：
+        //   嗶聲從喇叭出去的時刻 = AudioTrack.getTimestamp 換算 beepFrame
+        //   聲音進麥克風的時刻   = AudioRecord.getTimestamp 換算錄到的 frame 位置
+        // 兩者相減 = 時間戳之後的喇叭硬體＋空氣＋時間戳之前的麥克風硬體（看不見的那一段）。
         long[] sentNs = new long[5];
+        long[] beepFrame = new long[5];
+        android.media.AudioTimestamp tts = new android.media.AudioTimestamp();
+        boolean haveTts = false;
         long start = System.nanoTime();
         int k = 0;
         long written = 0;
         while (System.nanoTime() - start < (long) (secs - 1) * 1000000000L) {
             long el = (System.nanoTime() - start) / 1000000L;
             if (k < 5 && el >= 1000 + k * 1200) {
-                // 嗶聲的第一個 frame 在 written 這個位置；記下「寫入時刻」＋「前面還有多少沒播」
                 sentNs[k] = System.nanoTime();
+                beepFrame[k] = written;
                 t.write(beep, 0, beep.length);
                 written += beep.length / FRAME_BYTES;
                 k++;
@@ -701,26 +709,46 @@ public final class AudioAgent {
                 t.write(silence, 0, silence.length);
                 written += silence.length / FRAME_BYTES;
             }
+            android.media.AudioTimestamp x = new android.media.AudioTimestamp();
+            if (t.getTimestamp(x)) { tts = x; haveTts = true; }
         }
         rt.join(3000);
+        android.media.AudioTimestamp rts = new android.media.AudioTimestamp();
+        boolean haveRts = r.getTimestamp(rts, android.media.AudioTimestamp.TIMEBASE_MONOTONIC) == 0;
         t.stop(); t.release();
         r.stop(); r.release();
+        if (!haveTts || !haveRts) {
+            String line = "LOOP usage=" + usage + " src=" + src + " 沒有時間戳 track=" + haveTts + " rec=" + haveRts + "\n";
+            outS.write(line.getBytes("UTF-8"));
+            outS.flush();
+            return;
+        }
 
         // 底噪：第 0.2～0.9 秒
         int floor = 0;
         for (int i = (int) (0.2 * RATE); i < (int) (0.9 * RATE); i++) floor = Math.max(floor, Math.abs(recBuf[i]));
         int thr = Math.max(floor * 4, 800);
-        StringBuilder sb = new StringBuilder();
+        StringBuilder hidden = new StringBuilder();
+        StringBuilder fromWrite = new StringBuilder();
         for (int j = 0; j < k; j++) {
-            int from = (int) ((sentNs[j] - recStartNs[0]) * RATE / 1000000000L);
+            double presentNs = tts.nanoTime + (beepFrame[j] - tts.framePosition) * 1e9 / RATE;
+            long from = rts.framePosition + Math.round((presentNs - rts.nanoTime) * RATE / 1e9) - RATE / 20;
             int hit = -1;
-            for (int i = Math.max(0, from); i < Math.min(recBuf.length, from + RATE); i++) {
-                if (Math.abs(recBuf[i]) > thr) { hit = i; break; }
+            for (long i = Math.max(0, from); i < Math.min(recBuf.length, from + RATE); i++) {
+                if (Math.abs(recBuf[(int) i]) > thr) { hit = (int) i; break; }
             }
-            if (sb.length() > 0) sb.append(',');
-            sb.append(hit < 0 ? "-" : String.valueOf((hit - from) * 1000L / RATE));
+            if (j > 0) { hidden.append(','); fromWrite.append(','); }
+            if (hit < 0) {
+                hidden.append('-');
+                fromWrite.append('-');
+            } else {
+                double captureNs = rts.nanoTime + (hit - rts.framePosition) * 1e9 / RATE;
+                hidden.append(Math.round((captureNs - presentNs) / 1e6));
+                fromWrite.append(Math.round((captureNs - sentNs[j]) / 1e6));
+            }
         }
-        String line = "LOOP usage=" + usage + " src=" + src + " floor=" + floor + " ms=" + sb + "\n";
+        String line = "LOOP usage=" + usage + " src=" + src + " floor=" + floor
+                + " hidden_ms=" + hidden + " write_to_mic_ms=" + fromWrite + "\n";
         out("AUD" + line.trim());
         outS.write(line.getBytes("UTF-8"));
         outS.flush();
