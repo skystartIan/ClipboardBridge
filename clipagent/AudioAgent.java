@@ -290,6 +290,19 @@ public final class AudioAgent {
 
         // 統計（累計值，PC 自己算差）
         private long rx, lost, late, under, skipped, concealed;
+        private volatile long framesWritten;   // 寫進 AudioTrack 的 frame 數（量播放管線延遲用）
+
+        /** AudioTrack 管線延遲（ms）：已寫入但還沒從喇叭播出的量，用 getTimestamp 算；拿不到回 -1。 */
+        private long trackLatencyMs() {
+            try {
+                android.media.AudioTimestamp ts = new android.media.AudioTimestamp();
+                if (!track.getTimestamp(ts)) return -1;
+                double presented = ts.framePosition + (System.nanoTime() - ts.nanoTime) * (double) RATE / 1e9;
+                return Math.round((framesWritten - presented) * 1000.0 / RATE);
+            } catch (Throwable t) {
+                return -1;
+            }
+        }
 
         UdpSession(DatagramSocket udp, AudioTrack track, int token, int targetMs, int maxMs, boolean opus) {
             this.udp = udp;
@@ -324,15 +337,16 @@ public final class AudioAgent {
                 public void run() {
                     try {
                         while (running) {
-                            Thread.sleep(1000);
+                            Thread.sleep(250);              // 每 0.25 秒回報一次，PC 端才量得到緩衝的起伏
                             String line;
                             synchronized (lock) {
                                 long depth = (next >= 0 && highest >= next) ? (highest - next + 1) * pktMs : 0;
                                 line = "AUDST rx=" + rx + " lost=" + lost + " late=" + late
                                         + " under=" + under + " skip=" + skipped
                                         + " conceal=" + concealed + " depth=" + depth
-                                        + " target=" + targetPkts * pktMs + " pktms=" + pktMs + "\n";
+                                        + " target=" + targetPkts * pktMs + " pktms=" + pktMs;
                             }
+                            line += " trk=" + trackLatencyMs() + "\n";
                             ctrlOut.write(line.getBytes("UTF-8"));
                             ctrlOut.flush();
                         }
@@ -464,6 +478,7 @@ public final class AudioAgent {
                     playing = true;
                 }
                 track.write(outBuf, 0, n);                      // 阻塞：AudioTrack 決定播放速度
+                framesWritten += n / FRAME_BYTES;
             }
         }
 
