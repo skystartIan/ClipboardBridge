@@ -36,7 +36,11 @@ import java.net.SocketTimeoutException;
  *   hello：token u32
  *   NACK ：token u32, 0xFF, frame u32, n u16, idx u16 × n（n=0 = 整格重送）
  *
- * 啟動：CLASSPATH=... app_process / com.clipboardbridge.agent.VideoAgent <scid hex> <port> <token>
+ * 聲音模式（2026-11-10，第 4 個參數 "audio"）：launcher 那條獨立的聲音串流（scrcpy_audio.exe，
+ * --no-video --no-control）只有一條 audio socket，資料格式跟影像一樣（12-byte header＋資料），
+ * 只是 codec meta 4 bytes、沒有 control。每個封包通常只有一片，不加備援片。
+ *
+ * 啟動：CLASSPATH=... app_process / com.clipboardbridge.agent.VideoAgent <scid hex> <port> <token> [audio]
  * stdout：VIDRDY / VIDCONN / VIDERR
  */
 public final class VideoAgent {
@@ -49,6 +53,7 @@ public final class VideoAgent {
     private final String socketName;
     private final int port;
     private final int token;
+    private final boolean audio;
 
     private DatagramSocket udp;
     private volatile SocketAddress peer;
@@ -61,10 +66,11 @@ public final class VideoAgent {
     // 統計
     private volatile long frames, chunksSent, resent, nacks, hellos, bytes;
 
-    private VideoAgent(String scidHex, int port, int token) {
+    private VideoAgent(String scidHex, int port, int token, boolean audio) {
         this.socketName = "scrcpy_" + scidHex;
         this.port = port;
         this.token = token;
+        this.audio = audio;
         for (int i = 0; i < KEEP; i++) keepSeq[i] = -1;
     }
 
@@ -74,7 +80,8 @@ public final class VideoAgent {
             return;
         }
         try {
-            new VideoAgent(args[0], Integer.parseInt(args[1]), (int) Long.parseLong(args[2])).run();
+            boolean audio = args.length > 3 && "audio".equals(args[3]);
+            new VideoAgent(args[0], Integer.parseInt(args[1]), (int) Long.parseLong(args[2]), audio).run();
         } catch (Throwable t) {
             out("VIDERR:fatal " + t);
         }
@@ -108,19 +115,21 @@ public final class VideoAgent {
         if (dummy < 0) throw new Exception("server 沒送 dummy byte");
         sessOut.write(0);
         sessOut.flush();
-        out("VIDCONN:video socket ok");
+        out(audio ? "VIDCONN:audio socket ok" : "VIDCONN:video socket ok");
 
-        // 2. PC 接著連 control（scrcpy client 收到 dummy 後才會連 control）
-        Socket ctrl = acceptMode(ss, 'C');
+        // 2. PC 接著連 control（scrcpy client 收到 dummy 後才會連 control）；聲音模式沒有 control
+        if (!audio) {
+            Socket ctrl = acceptMode(ss, 'C');
+            controlLs = connectLs();
+            pipe(ctrl.getInputStream(), controlLs.getOutputStream(), "VidCtlUp");
+            pipe(controlLs.getInputStream(), ctrl.getOutputStream(), "VidCtlDown");
+            out("VIDCONN:control socket ok");
+        }
         ss.close();
-        controlLs = connectLs();
-        pipe(ctrl.getInputStream(), controlLs.getOutputStream(), "VidCtlUp");
-        pipe(controlLs.getInputStream(), ctrl.getOutputStream(), "VidCtlDown");
-        out("VIDCONN:control socket ok");
 
-        // 3. device meta(64)＋codec meta(12) 走 session（可靠）
+        // 3. device meta(64)＋codec meta（影像 12、聲音 4）走 session（可靠）
         DataInputStream din = new DataInputStream(vin);
-        byte[] meta = new byte[76];
+        byte[] meta = new byte[audio ? 68 : 76];
         din.readFully(meta);
         sessOut.write(meta);
         sessOut.flush();
