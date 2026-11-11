@@ -297,6 +297,15 @@ public final class AudioAgent {
         private int maxPkts;
         private long lastUnderMs = System.currentTimeMillis();
         private long lastDecayMs = System.currentTimeMillis();
+        private long lastBumpMs;         // 上次因斷音加目標的時間：同一陣卡頓只加一次
+        // 11-11：一陣卡頓會連續斷 2～6 次，以前每次都 +20 ms，一陣就墊 40～120 ms；
+        // 縮回又要穩一分鐘才 -10 ms，結果整場會議目標掛在 300～400 ms。
+        private static final int BUMP_HOLD_MS = 3000;     // 這段時間內再斷音不再加
+        private static final int DECAY_QUIET_MS = 30000;  // 穩這麼久才開始縮
+        private static final int DECAY_EVERY_MS = 15000;  // 之後每這麼久縮一步（-10 ms）
+        // 找斷音原因：每次回報之間平板「兩包之間最長隔多久」「兩次寫 AudioTrack 之間最長隔多久」
+        private long lastRxNs, maxRxGapNs, lastWriteNs, maxWriteGapNs;
+        private int trackFixes;          // AudioTrack 緩衝被系統放大、被改回來的次數
 
         private final Object lock = new Object();
         private final byte[][] slotData = new byte[SLOTS][];
@@ -378,9 +387,13 @@ public final class AudioAgent {
                                         + " under=" + under + " skip=" + skipped
                                         + " conceal=" + concealed + " depth=" + depth
                                         + " target=" + targetPkts * pktMs + " pktms=" + pktMs
-                                        + " drain=" + drained;
+                                        + " drain=" + drained
+                                        + " gap=" + maxRxGapNs / 1000000 + " wgap=" + maxWriteGapNs / 1000000;
+                                maxRxGapNs = 0;
+                                maxWriteGapNs = 0;
                             }
-                            line += " trk=" + trackLatencyMs() + "\n";
+                            line += " trk=" + trackLatencyMs() + " buf=" + keepTrackSmall()
+                                    + " fix=" + trackFixes + "\n";
                             ctrlOut.write(line.getBytes("UTF-8"));
                             ctrlOut.flush();
                         }
@@ -421,8 +434,11 @@ public final class AudioAgent {
                 int tok = readInt(buf, 0);
                 if (tok != token) continue;                     // 舊連線殘留的包
                 long seq = readInt(buf, 4) & 0xFFFFFFFFL;
+                long nowNs = System.nanoTime();
                 synchronized (lock) {
                     rx++;
+                    if (lastRxNs != 0 && nowNs - lastRxNs > maxRxGapNs) maxRxGapNs = nowNs - lastRxNs;
+                    lastRxNs = nowNs;
                     if (next >= 0 && seq < next) { late++; continue; }
                     int i = (int) (seq % SLOTS);
                     System.arraycopy(buf, PKT_HDR, slotData[i], 0, len);
@@ -456,14 +472,18 @@ public final class AudioAgent {
                     if (depth <= 0) {                           // 沒資料了：重新攢
                         priming = true;
                         under++;
-                        targetPkts = Math.min(capPkts, targetPkts + stepPkts);
-                        maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
-                        lastUnderMs = System.currentTimeMillis();
+                        long um = System.currentTimeMillis();
+                        if (um - lastBumpMs > BUMP_HOLD_MS) {   // 同一陣卡頓只加一次
+                            targetPkts = Math.min(capPkts, targetPkts + stepPkts);
+                            maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
+                            lastBumpMs = um;
+                        }
+                        lastUnderMs = um;
                         continue;
                     }
                     long nowMs = System.currentTimeMillis();
-                    if (targetPkts > baseTarget && nowMs - lastUnderMs > 60000
-                            && nowMs - lastDecayMs > 60000) {      // 穩了一分鐘：慢慢縮回去
+                    if (targetPkts > baseTarget && nowMs - lastUnderMs > DECAY_QUIET_MS
+                            && nowMs - lastDecayMs > DECAY_EVERY_MS) {   // 穩了一陣：慢慢縮回去
                         targetPkts = Math.max(baseTarget, targetPkts - Math.max(1, stepPkts / 2));
                         maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
                         lastDecayMs = nowMs;
@@ -539,8 +559,35 @@ public final class AudioAgent {
                     track.play();
                     playing = true;
                 }
+                long wNs = System.nanoTime();
+                if (lastWriteNs != 0) {
+                    synchronized (lock) {
+                        if (wNs - lastWriteNs > maxWriteGapNs) maxWriteGapNs = wNs - lastWriteNs;
+                    }
+                }
+                lastWriteNs = wNs;
                 track.write(outBuf, 0, n);                      // 阻塞：AudioTrack 決定播放速度
                 framesWritten += n / FRAME_BYTES;
+            }
+        }
+
+        /** AudioTrack 可用緩衝被系統放大時改回 TRACK_BUFFER_MS。11-11：一開始是 960 frames（20 ms），
+         *  投屏抓平板聲音之後系統重建了這條軌，變成 12096 frames（252 ms），延遲多了 250 ms 也沒人知道。
+         *  回傳目前的緩衝（frames）。 */
+        private int keepTrackSmall() {
+            if (Build.VERSION.SDK_INT < 24) return -1;
+            try {
+                int want = TRACK_BUFFER_MS * RATE / 1000;
+                int cur = track.getBufferSizeInFrames();
+                if (cur > want * 2) {
+                    int got = track.setBufferSizeInFrames(want);
+                    trackFixes++;
+                    out("AUDINFO:track buffer " + cur + "f -> " + got + "f");
+                    return got;
+                }
+                return cur;
+            } catch (Throwable t) {
+                return -2;
             }
         }
 
