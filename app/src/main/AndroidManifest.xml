@@ -36,10 +36,15 @@
     <!-- Android 11+ 的套件可見性過濾：沒有這段，getInputMethodList() 只回傳得到
          少數幾個輸入法（實測看不到 Gboard），ShotService 就無法把「輸入法的視窗
          事件」正確歸類成暫時視窗。宣告這個 intent 才看得到所有輸入法。 -->
+    <!-- wake_adb：螢幕關著時要點亮螢幕重試啟動 AutoADB（見 AdbWake）。一般權限，免授予。 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <queries>
         <intent>
             <action android:name="android.view.InputMethod" />
         </intent>
+        <!-- wake_adb 要 getLaunchIntentForPackage 找得到 AutoADB -->
+        <package android:name="com.tpn.adbautoenable" />
     </queries>
 
     <application

@@ -890,6 +890,60 @@ public class ShotService extends AccessibilityService {
         return out[0];
     }
 
+    // ── 遠端拉起其他 App（wake_adb 用）────────────────────
+    /**
+     * 用「這個無障礙服務自己」的 context 啟動 Activity；成功回 null，否則回錯誤字串。
+     *
+     * 為什麼要走這裡而不是 Application context：Android 10+ 不准背景啟動 Activity，
+     * 而「有被系統綁定的 AccessibilityService」在官方豁免清單上。豁免看的是 UID，
+     * 理論上任何 context 都行，但從服務本身發起最不容易被未來的規則誤判。
+     * 必須在主執行緒呼叫 startActivity 才拿得到同步的例外，所以用 latch 等。
+     */
+    static String launch(final android.content.Intent it) {
+        final ShotService s = instance;
+        if (s == null) return "a11y 服務未連線";
+        final String[] err = { "逾時" };
+        final CountDownLatch latch = new CountDownLatch(1);
+        s.main.post(() -> {
+            try {
+                it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                s.startActivity(it);
+                err[0] = null;
+            } catch (Throwable t) {
+                err[0] = t.toString();
+            } finally {
+                latch.countDown();
+            }
+        });
+        try { latch.await(3, TimeUnit.SECONDS); } catch (InterruptedException ignore) { }
+        return err[0];
+    }
+
+    /** 前景是 pkg 才按一次「返回」，把拉起來的畫面收掉；回傳有沒有按。 */
+    static boolean backIfTop(final String pkg) {
+        final ShotService s = instance;
+        if (s == null) return false;
+        final boolean[] r = new boolean[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        s.main.post(() -> {
+            AccessibilityNodeInfo root = null;
+            try {
+                root = s.getRootInActiveWindow();
+                CharSequence p = root != null ? root.getPackageName() : null;
+                if (p != null && pkg.equals(p.toString())) {
+                    r[0] = s.performGlobalAction(GLOBAL_ACTION_BACK);
+                }
+            } catch (Throwable t) {
+                android.util.Log.w(TAG, "ShotService backIfTop: " + t);
+            } finally {
+                if (root != null) { try { root.recycle(); } catch (Throwable ignore) { } }
+                latch.countDown();
+            }
+        });
+        try { latch.await(2, TimeUnit.SECONDS); } catch (InterruptedException ignore) { }
+        return r[0];
+    }
+
     // ── 游標下取字 ──────────────────────────────────────
     /**
      * 指令 8：直接把 (x,y) 那則訊息的整段文字寫進平板剪貼簿。

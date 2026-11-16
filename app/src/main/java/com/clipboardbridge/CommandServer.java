@@ -252,6 +252,15 @@ class CommandServer {
                 return;
             }
 
+            case "wake_adb": {
+                // 和 restart_agent 一樣是固定指令、不吃參數，同事也能用。
+                // 刻意**不需要 Shizuku**：它就是用來拆「adb 沒開 → Shizuku 起不來」
+                // 那個死結的（見 AdbWake）。
+                s.setSoTimeout(AdbWake.TOTAL_TIMEOUT_S * 1000);
+                replyJson(out, AdbWake.run(context));
+                return;
+            }
+
             case "log": {
                 // 固定指令、不吃參數：同事拿得到 log 但拿不到任意 shell
                 if (!AgentStarter.shizukuReady()) { reply(out, ERR_NO_SHIZUKU); return; }
