@@ -60,7 +60,8 @@ public final class AudioAgent {
     // AudioTrack 實際配到的緩衝常常是 128 ms（6144 frames）；寫入是阻塞的，緩衝會被填滿，
     // 等於固定多 128 ms 延遲。建好後把「有效緩衝」縮到這個長度。
     // 11-07：dumpsys media.audio_flinger 確認這條軌已經是 FAST（F1），可以用更小的緩衝；40 → 20 ms
-    private static final int TRACK_BUFFER_MS = 20;
+    // 11-17 第一場 Teams 會議：20 ms 時平板播放端在網路、X1 都沒問題的情況下一分鐘斷音 10 次 → 30 ms
+    private static final int TRACK_BUFFER_MS = 30;
 
     // UDP
     private static final int PKT_MS = 5;
