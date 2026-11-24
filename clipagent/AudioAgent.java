@@ -306,7 +306,15 @@ public final class AudioAgent {
         private static final int DECAY_EVERY_MS = 15000;  // 之後每這麼久縮一步（-10 ms）
         // 找斷音原因：每次回報之間平板「兩包之間最長隔多久」「兩次寫 AudioTrack 之間最長隔多久」
         private long lastRxNs, maxRxGapNs, lastWriteNs, maxWriteGapNs;
-        private int trackFixes;          // AudioTrack 緩衝被系統放大、被改回來的次數
+        // 11-24：安靜時目標一路縮到 20 ms，可是平板收包間隔一直約 40 ms（旅行路由器），
+        // 一開口就連斷 23 次、等目標爬回 100 ms 才停。目標下限 = 最近 10 秒最長收包間隔＋一包。
+        // 超過 GAP_IGNORE_MS 的是 X1 那邊停住，緩衝墊不起來，不算。
+        private static final int GAP_SECS = 10;
+        private static final int GAP_IGNORE_MS = 150;
+        private final int[] gapSec = new int[GAP_SECS];   // 每秒最長收包間隔（ms）
+        private long gapSecNow = -1;
+        private int floorPkts;           // 由上面算出的目標下限（包）
+        private int trackFixes;         // AudioTrack 緩衝被系統放大、被改回來的次數
 
         private final Object lock = new Object();
         private final byte[][] slotData = new byte[SLOTS][];
@@ -387,7 +395,8 @@ public final class AudioAgent {
                                 line = "AUDST rx=" + rx + " lost=" + lost + " late=" + late
                                         + " under=" + under + " skip=" + skipped
                                         + " conceal=" + concealed + " depth=" + depth
-                                        + " target=" + targetPkts * pktMs + " pktms=" + pktMs
+                                        + " target=" + targetPkts * pktMs + " floor=" + floorPkts * pktMs
+                                        + " pktms=" + pktMs
                                         + " drain=" + drained
                                         + " gap=" + maxRxGapNs / 1000000 + " wgap=" + maxWriteGapNs / 1000000;
                                 maxRxGapNs = 0;
@@ -439,6 +448,7 @@ public final class AudioAgent {
                 synchronized (lock) {
                     rx++;
                     if (lastRxNs != 0 && nowNs - lastRxNs > maxRxGapNs) maxRxGapNs = nowNs - lastRxNs;
+                    if (lastRxNs != 0) noteGap((int) ((nowNs - lastRxNs) / 1000000), nowNs);
                     lastRxNs = nowNs;
                     if (next >= 0 && seq < next) { late++; continue; }
                     int i = (int) (seq % SLOTS);
@@ -449,6 +459,28 @@ public final class AudioAgent {
                     if (next < 0) next = seq;
                     lock.notifyAll();
                 }
+            }
+        }
+
+        /** 記一次收包間隔（lock 內呼叫），順便更新 floorPkts；目標低於下限就直接拉上去。 */
+        private void noteGap(int gapMs, long nowNs) {
+            long sec = nowNs / 1000000000L;
+            if (sec != gapSecNow) {
+                if (gapSecNow < 0 || sec - gapSecNow >= GAP_SECS) {
+                    java.util.Arrays.fill(gapSec, 0);
+                } else {
+                    for (long k = gapSecNow + 1; k <= sec; k++) gapSec[(int) (k % GAP_SECS)] = 0;
+                }
+                gapSecNow = sec;
+            }
+            int i = (int) (sec % GAP_SECS);
+            if (gapMs <= GAP_IGNORE_MS && gapMs > gapSec[i]) gapSec[i] = gapMs;
+            int m = 0;
+            for (int v : gapSec) if (v > m) m = v;
+            floorPkts = Math.min(capPkts, (m + pktMs - 1) / pktMs + 1);
+            if (targetPkts < floorPkts) {
+                targetPkts = floorPkts;
+                maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
             }
         }
 
@@ -485,7 +517,8 @@ public final class AudioAgent {
                     long nowMs = System.currentTimeMillis();
                     if (targetPkts > baseTarget && nowMs - lastUnderMs > DECAY_QUIET_MS
                             && nowMs - lastDecayMs > DECAY_EVERY_MS) {   // 穩了一陣：慢慢縮回去
-                        targetPkts = Math.max(baseTarget, targetPkts - Math.max(1, stepPkts / 2));
+                        targetPkts = Math.max(Math.max(baseTarget, floorPkts),
+                                targetPkts - Math.max(1, stepPkts / 2));
                         maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
                         lastDecayMs = nowMs;
                     }
