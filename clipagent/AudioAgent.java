@@ -395,7 +395,7 @@ public final class AudioAgent {
                                 line = "AUDST rx=" + rx + " lost=" + lost + " late=" + late
                                         + " under=" + under + " skip=" + skipped
                                         + " conceal=" + concealed + " depth=" + depth
-                                        + " target=" + targetPkts * pktMs + " floor=" + floorPkts * pktMs
+                                        + " target=" + tgt() * pktMs + " adapt=" + targetPkts * pktMs + " floor=" + floorPkts * pktMs
                                         + " pktms=" + pktMs
                                         + " drain=" + drained
                                         + " gap=" + maxRxGapNs / 1000000 + " wgap=" + maxWriteGapNs / 1000000;
@@ -478,11 +478,11 @@ public final class AudioAgent {
             int m = 0;
             for (int v : gapSec) if (v > m) m = v;
             floorPkts = Math.min(capPkts, (m + pktMs - 1) / pktMs + 1);
-            if (targetPkts < floorPkts) {
-                targetPkts = floorPkts;
-                maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
-            }
         }
+
+        /** 實際用的目標＝斷音調出來的目標與收包間隔下限取大；下限跟著網路變，穩了就自己降回來。 */
+        private int tgt() { return Math.max(targetPkts, floorPkts); }
+        private int maxFor(int t) { return Math.min(SLOTS - 8, Math.max(baseMax, t * 3)); }
 
         private void playLoop(OpusDec dec) throws Exception {
             int pcmLen = pktMs * BYTES_PER_MS;
@@ -496,7 +496,7 @@ public final class AudioAgent {
                 boolean got;
                 int plen = 0;
                 synchronized (lock) {
-                    if (next < 0 || (priming && highest - next + 1 < targetPkts)) {
+                    if (next < 0 || (priming && highest - next + 1 < tgt())) {
                         lock.wait(20);
                         continue;
                     }
@@ -507,8 +507,8 @@ public final class AudioAgent {
                         under++;
                         long um = System.currentTimeMillis();
                         if (um - lastBumpMs > BUMP_HOLD_MS) {   // 同一陣卡頓只加一次
-                            targetPkts = Math.min(capPkts, targetPkts + stepPkts);
-                            maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
+                            targetPkts = Math.min(capPkts, tgt() + stepPkts);
+                            maxPkts = maxFor(targetPkts);
                             lastBumpMs = um;
                         }
                         lastUnderMs = um;
@@ -517,13 +517,12 @@ public final class AudioAgent {
                     long nowMs = System.currentTimeMillis();
                     if (targetPkts > baseTarget && nowMs - lastUnderMs > DECAY_QUIET_MS
                             && nowMs - lastDecayMs > DECAY_EVERY_MS) {   // 穩了一陣：慢慢縮回去
-                        targetPkts = Math.max(Math.max(baseTarget, floorPkts),
-                                targetPkts - Math.max(1, stepPkts / 2));
+                        targetPkts = Math.max(baseTarget, targetPkts - Math.max(1, stepPkts / 2));
                         maxPkts = Math.min(SLOTS - 8, Math.max(baseMax, targetPkts * 3));
                         lastDecayMs = nowMs;
                     }
-                    if (depth > maxPkts) {                      // 積太多：跳到最新的 target
-                        long nn = highest - targetPkts + 1;
+                    if (depth > Math.max(maxPkts, maxFor(tgt()))) {   // 積太多：跳到最新的 target
+                        long nn = highest - tgt() + 1;
                         skipped += (nn - next) * pktMs / PKT_MS;   // 以 5 ms 為單位回報，PC 端照舊換算
                         next = nn;
                     }
@@ -571,7 +570,7 @@ public final class AudioAgent {
                 synchronized (lock) { depthNow = highest - next + 1; }
                 if (depthNow < winMin) winMin = depthNow;
                 if (nowMs - winStart >= 1000) {
-                    long excess = winMin - targetPkts;
+                    long excess = winMin - tgt();
                     if (excess * pktMs > DRAIN_MARGIN_MS) {
                         drainBudget = excess;
                         if (budgetSince == 0) budgetSince = nowMs;
